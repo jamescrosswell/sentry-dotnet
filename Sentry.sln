@@ -28,9 +28,9 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = ".root", ".root", "{9D7E2F87
 		CONTRIBUTING.md = CONTRIBUTING.md
 		Directory.Build.props = Directory.Build.props
 		Directory.Build.targets = Directory.Build.targets
-		README.md = README.md
 		global.json = global.json
 		GlobalUsings.cs = GlobalUsings.cs
+		README.md = README.md
 	EndProjectSection
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "samples", "samples", "{77454495-55EE-4B40-A089-71B9E8F82E89}"
@@ -156,7 +156,7 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "MauiTestUtils", "MauiTestUt
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Sentry.Samples.Ios", "samples\Sentry.Samples.Ios\Sentry.Samples.Ios.csproj", "{C2876321-A612-4E66-AF33-D3928FA6366F}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Sentry.Testing.CrashableApp", "test\Sentry.Testing.CrashableApp\Sentry.Testing.CrashableApp.csproj", "{DA3CECBB-83BE-441A-852C-077809C48307}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Sentry.Testing.CrashableApp", "test\Sentry.Testing.CrashableApp\Sentry.Testing.CrashableApp.csproj", "{DA3CECBB-83BE-441A-852C-077809C48307}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Sentry.Samples.MacCatalyst", "samples\Sentry.Samples.MacCatalyst\Sentry.Samples.MacCatalyst.csproj", "{3506539B-983C-44FD-BD95-1931562E7919}"
 EndProject
@@ -177,6 +177,8 @@ EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Sentry.Profiling.Tests", "test\Sentry.Profiling.Tests\Sentry.Profiling.Tests.csproj", "{2E750A7C-561D-4959-B967-042755139D84}"
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Sentry.Samples.Console.Profiling", "samples\Sentry.Samples.Console.Profiling\Sentry.Samples.Console.Profiling.csproj", "{0F84C0BB-FDD4-43A9-B594-923EB10C8E3F}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Sentry.Samples.WinForms", "samples\Sentry.Samples.WinForms\Sentry.Samples.WinForms.csproj", "{EE88BBD6-EA09-41BF-B156-68947382177C}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -388,15 +390,15 @@ Global
 		{C2876321-A612-4E66-AF33-D3928FA6366F}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{C2876321-A612-4E66-AF33-D3928FA6366F}.Release|Any CPU.Build.0 = Release|Any CPU
 		{C2876321-A612-4E66-AF33-D3928FA6366F}.Release|Any CPU.Deploy.0 = Release|Any CPU
-		{DA3CECBB-83BE-441A-852C-077809C48307}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{DA3CECBB-83BE-441A-852C-077809C48307}.Release|Any CPU.Build.0 = Release|Any CPU
 		{DA3CECBB-83BE-441A-852C-077809C48307}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{DA3CECBB-83BE-441A-852C-077809C48307}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{DA3CECBB-83BE-441A-852C-077809C48307}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{DA3CECBB-83BE-441A-852C-077809C48307}.Release|Any CPU.Build.0 = Release|Any CPU
 		{3506539B-983C-44FD-BD95-1931562E7919}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{3506539B-983C-44FD-BD95-1931562E7919}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3506539B-983C-44FD-BD95-1931562E7919}.Debug|Any CPU.Deploy.0 = Debug|Any CPU
 		{3506539B-983C-44FD-BD95-1931562E7919}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{3506539B-983C-44FD-BD95-1931562E7919}.Release|Any CPU.Build.0 = Release|Any CPU
-		{3506539B-983C-44FD-BD95-1931562E7919}.Debug|Any CPU.Deploy.0 = Debug|Any CPU
 		{70066C6C-0A18-4322-A02A-9A0DFE59C02B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{70066C6C-0A18-4322-A02A-9A0DFE59C02B}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{70066C6C-0A18-4322-A02A-9A0DFE59C02B}.Release|Any CPU.ActiveCfg = Release|Any CPU
@@ -433,6 +435,10 @@ Global
 		{0F84C0BB-FDD4-43A9-B594-923EB10C8E3F}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{0F84C0BB-FDD4-43A9-B594-923EB10C8E3F}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{0F84C0BB-FDD4-43A9-B594-923EB10C8E3F}.Release|Any CPU.Build.0 = Release|Any CPU
+		{EE88BBD6-EA09-41BF-B156-68947382177C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{EE88BBD6-EA09-41BF-B156-68947382177C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{EE88BBD6-EA09-41BF-B156-68947382177C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{EE88BBD6-EA09-41BF-B156-68947382177C}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -502,6 +508,7 @@ Global
 		{BD6CEF44-E05E-4C22-8D2F-0558A93DD2D6} = {AF6AF4C7-8AA2-4D59-8064-2D79560904EB}
 		{2E750A7C-561D-4959-B967-042755139D84} = {83263231-1A2A-4733-B759-EEFF14E8C5D5}
 		{0F84C0BB-FDD4-43A9-B594-923EB10C8E3F} = {77454495-55EE-4B40-A089-71B9E8F82E89}
+		{EE88BBD6-EA09-41BF-B156-68947382177C} = {77454495-55EE-4B40-A089-71B9E8F82E89}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {0C652B1A-DF72-4EE5-A98B-194FE2C054F6}
