@@ -1,146 +1,98 @@
 using Sentry.Extensibility;
+using Sentry.Internal;
 using Sentry.Internal.Extensions;
+using Sentry.Internal.OpenTelemetry;
 
 namespace Sentry;
 
 /// <summary>
 /// Special HTTP message handler that can be used to propagate Sentry headers and other contextual information.
 /// </summary>
-public class SentryHttpMessageHandler : DelegatingHandler
+public class SentryHttpMessageHandler : SentryMessageHandler
 {
     private readonly IHub _hub;
     private readonly SentryOptions? _options;
+    private readonly ISentryFailedRequestHandler? _failedRequestHandler;
 
     /// <summary>
-    /// Initializes an instance of <see cref="SentryHttpMessageHandler"/>.
-    /// </summary>
-    public SentryHttpMessageHandler(IHub hub)
-    {
-        _hub = hub;
-        _options = hub.GetSentryOptions();
-    }
-
-    internal SentryHttpMessageHandler(IHub hub, SentryOptions options)
-    {
-        _hub = hub;
-        _options = options;
-    }
-
-    /// <summary>
-    /// Initializes an instance of <see cref="SentryHttpMessageHandler"/>.
-    /// </summary>
-    public SentryHttpMessageHandler(HttpMessageHandler innerHandler, IHub hub)
-        : this(hub)
-    {
-        InnerHandler = innerHandler;
-    }
-
-    internal SentryHttpMessageHandler(HttpMessageHandler innerHandler, IHub hub, SentryOptions options)
-        : this(hub, options)
-    {
-        InnerHandler = innerHandler;
-    }
-
-    /// <summary>
-    /// Initializes an instance of <see cref="SentryHttpMessageHandler"/>.
-    /// </summary>
-    public SentryHttpMessageHandler(HttpMessageHandler innerHandler)
-        : this(innerHandler, HubAdapter.Instance) { }
-
-    /// <summary>
-    /// Initializes an instance of <see cref="SentryHttpMessageHandler"/>.
+    /// Constructs an instance of <see cref="SentryHttpMessageHandler"/>.
     /// </summary>
     public SentryHttpMessageHandler()
-        : this(HubAdapter.Instance) { }
+        : this(default, default, default) { }
+
+    /// <summary>
+    /// Constructs an instance of <see cref="SentryHttpMessageHandler"/>.
+    /// </summary>
+    /// <param name="innerHandler">An inner message handler to delegate calls to.</param>
+    public SentryHttpMessageHandler(HttpMessageHandler innerHandler)
+        : this(default, default, innerHandler) { }
+
+    /// <summary>
+    /// Constructs an instance of <see cref="SentryHttpMessageHandler"/>.
+    /// </summary>
+    /// <param name="hub">The Sentry hub.</param>
+    public SentryHttpMessageHandler(IHub hub)
+        : this(hub, default)
+    {
+    }
+
+    /// <summary>
+    /// Constructs an instance of <see cref="SentryHttpMessageHandler"/>.
+    /// </summary>
+    /// <param name="innerHandler">An inner message handler to delegate calls to.</param>
+    /// <param name="hub">The Sentry hub.</param>
+    public SentryHttpMessageHandler(HttpMessageHandler innerHandler, IHub hub)
+        : this(hub, default, innerHandler)
+    {
+    }
+
+    internal SentryHttpMessageHandler(IHub? hub, SentryOptions? options, HttpMessageHandler? innerHandler = default, ISentryFailedRequestHandler? failedRequestHandler = null)
+        : base(hub, options, innerHandler)
+    {
+        _hub = hub ?? HubAdapter.Instance;
+        _options = options ?? _hub.GetSentryOptions();
+        _failedRequestHandler = failedRequestHandler;
+
+        // Use the default failed request handler if none was supplied - but options is required.
+        if (_failedRequestHandler == null && _options != null)
+        {
+            _failedRequestHandler = new SentryHttpFailedRequestHandler(_hub, _options);
+        }
+    }
 
     /// <inheritdoc />
-    protected override async Task<HttpResponseMessage> SendAsync(
-        HttpRequestMessage request,
-        CancellationToken cancellationToken)
+    protected internal override ISpan? ProcessRequest(HttpRequestMessage request, string method, string url)
     {
-        // Prevent null reference exception in the following call
-        // in case the user didn't set an inner handler.
-        InnerHandler ??= new HttpClientHandler();
-
-        var requestMethod = request.Method.Method.ToUpperInvariant();
-        var url = request.RequestUri?.ToString() ?? string.Empty;
-
-        if (_options?.TracePropagationTargets.ShouldPropagateTrace(url) is true or null)
-        {
-            AddSentryTraceHeader(request);
-            AddBaggageHeader(request);
-        }
-
         // Start a span that tracks this request
         // (may be null if transaction is not set on the scope)
         var span = _hub.GetSpan()?.StartChild(
             "http.client",
-            // e.g. "GET https://example.com"
-            $"{requestMethod} {url}");
-
-        try
-        {
-            var response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
-
-            var breadcrumbData = new Dictionary<string, string>
-            {
-                { "url", url },
-                { "method", requestMethod },
-                { "status_code", ((int)response.StatusCode).ToString() }
-            };
-            _hub.AddBreadcrumb(string.Empty, "http", "http", breadcrumbData);
-
-            // This will handle unsuccessful status codes as well
-            span?.Finish(SpanStatusConverter.FromHttpStatusCode(response.StatusCode));
-
-            return response;
-        }
-        catch (Exception ex)
-        {
-            span?.Finish(ex);
-            throw;
-        }
+            $"{method} {url}" // e.g. "GET https://example.com"
+            );
+        span?.SetExtra(OtelSemanticConventions.AttributeHttpRequestMethod, method);
+        return span;
     }
 
-    private void AddSentryTraceHeader(HttpRequestMessage request)
+    /// <inheritdoc />
+    protected internal override void HandleResponse(HttpResponseMessage response, ISpan? span, string method, string url)
     {
-        // Set trace header if it hasn't already been set
-        if (!request.Headers.Contains(SentryTraceHeader.HttpHeaderName) && _hub.GetTraceHeader() is { } traceHeader)
+        var breadcrumbData = new Dictionary<string, string>
         {
-            request.Headers.Add(SentryTraceHeader.HttpHeaderName, traceHeader.ToString());
-        }
-    }
+            {"url", url},
+            {"method", method},
+            {"status_code", ((int) response.StatusCode).ToString()}
+        };
+        _hub.AddBreadcrumb(string.Empty, "http", "http", breadcrumbData);
 
-    private void AddBaggageHeader(HttpRequestMessage request)
-    {
-        var transaction = _hub.GetSpan();
-        if (transaction is not TransactionTracer {DynamicSamplingContext: {IsEmpty: false} dsc})
+        // Create events for failed requests
+        _failedRequestHandler?.HandleResponse(response);
+
+        // This will handle unsuccessful status codes as well
+        if (span is not null)
         {
-            return;
+            span.SetExtra(OtelSemanticConventions.AttributeHttpResponseStatusCode, (int)response.StatusCode);
+            var status = SpanStatusConverter.FromHttpStatusCode(response.StatusCode);
+            span.Finish(status);
         }
-
-        var baggage = dsc.ToBaggageHeader();
-
-        if (request.Headers.TryGetValues(BaggageHeader.HttpHeaderName, out var baggageHeaders))
-        {
-            var headers = baggageHeaders.ToList();
-            if (headers.Any(h => h.StartsWith(BaggageHeader.SentryKeyPrefix)))
-            {
-                // The Sentry headers have already been added to this request.  Do nothing.
-                return;
-            }
-
-            // Merge existing baggage headers with ours.
-            var allBaggage = headers
-                .Select(s => BaggageHeader.TryParse(s)).ExceptNulls()
-                .Append(baggage);
-            baggage = BaggageHeader.Merge(allBaggage);
-
-            // Remove the existing header so we can replace it with the merged one.
-            request.Headers.Remove(BaggageHeader.HttpHeaderName);
-        }
-
-        // Set the baggage header
-        request.Headers.Add(BaggageHeader.HttpHeaderName, baggage.ToString());
     }
 }

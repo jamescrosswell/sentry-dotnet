@@ -3,7 +3,7 @@
   Payloads: [
     {
       Source: {
-        Name: GET v1.1/Target,
+        Name: GET /v1.1/Target,
         NameSource: Route,
         Platform: csharp,
         Operation: http.server,
@@ -69,6 +69,10 @@
             Category: Microsoft.AspNetCore.Routing.EndpointMiddleware
           }
         ],
+        Extra: {
+          http.request.method: GET,
+          http.response.status_code: 200
+        },
         Tags: {
           ActionId: Guid_1,
           ActionName: Sentry.AspNetCore.Tests.WebIntegrationTests+VersionController.Method (Sentry.AspNetCore.Tests),

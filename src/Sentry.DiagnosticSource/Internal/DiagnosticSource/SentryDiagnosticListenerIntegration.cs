@@ -7,10 +7,9 @@ internal class SentryDiagnosticListenerIntegration : ISdkIntegration
 {
     public void Register(IHub hub, SentryOptions options)
     {
-        if (!options.IsTracingEnabled)
+        if (!options.IsPerformanceMonitoringEnabled)
         {
             options.Log(SentryLevel.Info, "DiagnosticSource Integration is disabled because tracing is disabled.");
-            options.DisableDiagnosticSourceIntegration();
             return;
         }
 

@@ -12,13 +12,9 @@ namespace Sentry;
 /// It allows safe static access to a client and scope management.
 /// When the SDK is uninitialized, calls to this class result in no-op so no callbacks are invoked.
 /// </remarks>
-#if __MOBILE__
 public static partial class SentrySdk
-#else
-    public static class SentrySdk
-#endif
 {
-    private static IHub CurrentHub = DisabledHub.Instance;
+    internal static IHub CurrentHub = DisabledHub.Instance;
 
     internal static SentryOptions? CurrentOptions => CurrentHub.GetSentryOptions();
 
@@ -40,7 +36,7 @@ public static partial class SentrySdk
         // from anywhere else, return a disabled hub.
         if (Dsn.IsDisabled(dsnString))
         {
-            options.LogWarning("Init was called but no DSN was provided nor located. Sentry SDK will be disabled.");
+            options.LogWarning("Init called with an empty string as the DSN. Sentry SDK will be disabled.");
             return DisabledHub.Instance;
         }
 
@@ -52,17 +48,31 @@ public static partial class SentrySdk
         }
 
         // Initialize native platform SDKs here
-#if __MOBILE__
         if (options.InitNativeSdks)
         {
 #if __IOS__
             InitSentryCocoaSdk(options);
 #elif ANDROID
             InitSentryAndroidSdk(options);
+#elif NET8_0_OR_GREATER
+            if (AotHelper.IsNativeAot)
+            {
+                InitNativeSdk(options);
+            }
 #endif
         }
-#endif
-        return new Hub(options);
+
+        // We init the hub after native SDK in case the native init needs to adapt some options.
+        var hub = new Hub(options);
+
+        // Run all post-init callbacks set up by native integrations.
+        foreach (var callback in options.PostInitCallbacks)
+        {
+            callback.Invoke(hub);
+        }
+        options.PostInitCallbacks.Clear();
+
+        return hub;
     }
 
     /// <summary>
@@ -71,7 +81,17 @@ public static partial class SentrySdk
     /// <remarks>
     /// If the DSN is not found, the SDK will not change state.
     /// </remarks>
-    /// <returns>An object that should be disposed when the application terminates.</returns>
+    /// <returns>An object that can be disposed to disable the Sentry SDK, if desired.</returns>
+    /// <remarks>
+    /// Disposing the result will flush previously-captured events and disable the SDK.
+    /// In most cases there's no need to dispose the result.  There are only a few exceptions where it makes
+    /// sense to dispose:
+    /// <list type="bullet">
+    /// <item>You have additional work to perform that you don't want Sentry to monitor.</item>
+    /// <item>You have used <see cref="SentryOptionsExtensions.DisableAppDomainProcessExitFlush"/>.</item>
+    /// <item>You are integrating Sentry into an environment that has custom application lifetime events.</item>
+    /// </list>
+    /// </remarks>
     public static IDisposable Init() => Init((string?)null);
 
     /// <summary>
@@ -82,7 +102,17 @@ public static partial class SentrySdk
     /// </remarks>
     /// <seealso href="https://develop.sentry.dev/sdk/overview/#usage-for-end-users"/>
     /// <param name="dsn">The dsn.</param>
-    /// <returns>An object that should be disposed when the application terminates.</returns>
+    /// <returns>An object that can be disposed to disable the Sentry SDK, if desired.</returns>
+    /// <remarks>
+    /// Disposing the result will flush previously-captured events and disable the SDK.
+    /// In most cases there's no need to dispose the result.  There are only a few exceptions where it makes
+    /// sense to dispose:
+    /// <list type="bullet">
+    /// <item>You have additional work to perform that you don't want Sentry to monitor.</item>
+    /// <item>You have used <see cref="SentryOptionsExtensions.DisableAppDomainProcessExitFlush"/>.</item>
+    /// <item>You are integrating Sentry into an environment that has custom application lifetime events.</item>
+    /// </list>
+    /// </remarks>
     public static IDisposable Init(string? dsn) => !Dsn.IsDisabled(dsn)
         ? Init(c => c.Dsn = dsn)
         : DisabledHub.Instance;
@@ -91,7 +121,17 @@ public static partial class SentrySdk
     /// Initializes the SDK with an optional configuration options callback.
     /// </summary>
     /// <param name="configureOptions">The configuration options callback.</param>
-    /// <returns>An object that should be disposed when the application terminates.</returns>
+    /// <returns>An object that can be disposed to disable the Sentry SDK, if desired.</returns>
+    /// <remarks>
+    /// Disposing the result will flush previously-captured events and disable the SDK.
+    /// In most cases there's no need to dispose the result.  There are only a few exceptions where it makes
+    /// sense to dispose:
+    /// <list type="bullet">
+    /// <item>You have additional work to perform that you don't want Sentry to monitor.</item>
+    /// <item>You have used <see cref="SentryOptionsExtensions.DisableAppDomainProcessExitFlush"/>.</item>
+    /// <item>You are integrating Sentry into an environment that has custom application lifetime events.</item>
+    /// </list>
+    /// </remarks>
     public static IDisposable Init(Action<SentryOptions>? configureOptions)
     {
         var options = new SentryOptions();
@@ -107,7 +147,17 @@ public static partial class SentrySdk
     /// <remarks>
     /// Used by integrations which have their own delegates.
     /// </remarks>
-    /// <returns>An object that should be disposed when the application terminates.</returns>
+    /// <returns>An object that can be disposed to disable the Sentry SDK, if desired.</returns>
+    /// <remarks>
+    /// Disposing the result will flush previously-captured events and disable the SDK.
+    /// In most cases there's no need to dispose the result.  There are only a few exceptions where it makes
+    /// sense to dispose:
+    /// <list type="bullet">
+    /// <item>You have additional work to perform that you don't want Sentry to monitor.</item>
+    /// <item>You have used <see cref="SentryOptionsExtensions.DisableAppDomainProcessExitFlush"/>.</item>
+    /// <item>You are integrating Sentry into an environment that has custom application lifetime events.</item>
+    /// </list>
+    /// </remarks>
     [EditorBrowsable(EditorBrowsableState.Never)]
     public static IDisposable Init(SentryOptions options) => UseHub(InitHub(options));
 
@@ -179,7 +229,6 @@ public static partial class SentrySdk
         {
             _ = Interlocked.CompareExchange(ref CurrentHub, DisabledHub.Instance, _localHub);
             (_localHub as IDisposable)?.Dispose();
-
             _localHub = null!;
         }
     }
@@ -272,18 +321,14 @@ public static partial class SentrySdk
         => CurrentHub.AddBreadcrumb(clock, message, category, type, data, level);
 
     /// <summary>
-    /// Runs the callback with a new scope which gets dropped at the end.
+    /// Adds a breadcrumb to the current Scope.
     /// </summary>
-    /// <remarks>
-    /// Pushes a new scope, runs the callback, pops the scope.
-    /// </remarks>
-    /// <see href="https://docs.sentry.io/platforms/dotnet/enriching-events/scopes/#local-scopes"/>
-    /// <param name="scopeCallback">The callback to run with the one time scope.</param>
-    [Obsolete("This method is deprecated in favor of overloads of CaptureEvent, CaptureMessage and CaptureException " +
-              "that provide a callback to a configurable scope.")]
+    /// <param name="breadcrumb">The breadcrumb to be added</param>
+    /// <param name="hint">A hint providing additional context that can be used in the BeforeBreadcrumb callback</param>
+    /// <see cref="AddBreadcrumb(string, string?, string?, IDictionary{string, string}?, BreadcrumbLevel)"/>
     [DebuggerStepThrough]
-    public static void WithScope(Action<Scope> scopeCallback)
-        => CurrentHub.WithScope(scopeCallback);
+    public static void AddBreadcrumb(Breadcrumb breadcrumb, Hint? hint = null)
+        => CurrentHub.AddBreadcrumb(breadcrumb, hint);
 
     /// <summary>
     /// Configures the scope through the callback.
@@ -303,24 +348,16 @@ public static partial class SentrySdk
         => CurrentHub.ConfigureScopeAsync(configureScope);
 
     /// <summary>
-    /// Captures the event.
-    /// </summary>
-    /// <param name="evt">The event.</param>
-    /// <returns>The Id of the event.</returns>
-    [DebuggerStepThrough]
-    public static SentryId CaptureEvent(SentryEvent evt)
-        => CurrentHub.CaptureEvent(evt);
-
-    /// <summary>
-    /// Captures the event using the specified scope.
+    /// Captures the event, passing a hint, using the specified scope.
     /// </summary>
     /// <param name="evt">The event.</param>
     /// <param name="scope">The scope.</param>
+    /// <param name="hint">a hint for the event.</param>
     /// <returns>The Id of the event.</returns>
     [DebuggerStepThrough]
     [EditorBrowsable(EditorBrowsableState.Never)]
-    public static SentryId CaptureEvent(SentryEvent evt, Scope? scope)
-        => CurrentHub.CaptureEvent(evt, scope);
+    public static SentryId CaptureEvent(SentryEvent evt, Scope? scope = null, Hint? hint = null)
+        => CurrentHub.CaptureEvent(evt, scope, hint);
 
     /// <summary>
     /// Captures an event with a configurable scope.
@@ -334,7 +371,22 @@ public static partial class SentrySdk
     [DebuggerStepThrough]
     [EditorBrowsable(EditorBrowsableState.Never)]
     public static SentryId CaptureEvent(SentryEvent evt, Action<Scope> configureScope)
-        => CurrentHub.CaptureEvent(evt, configureScope);
+        => CurrentHub.CaptureEvent(evt, null, configureScope);
+
+    /// <summary>
+    /// Captures an event with a configurable scope.
+    /// </summary>
+    /// <remarks>
+    /// This allows modifying a scope without affecting other events.
+    /// </remarks>
+    /// <param name="evt">The event.</param>
+    /// <param name="hint">An optional hint to be provided with the event</param>
+    /// <param name="configureScope">The callback to configure the scope.</param>
+    /// <returns>The Id of the event.</returns>
+    [DebuggerStepThrough]
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public static SentryId CaptureEvent(SentryEvent evt, Hint? hint, Action<Scope> configureScope)
+        => CurrentHub.CaptureEvent(evt, hint, configureScope);
 
     /// <summary>
     /// Captures the exception.
@@ -404,9 +456,26 @@ public static partial class SentrySdk
     /// <summary>
     /// Captures a transaction.
     /// </summary>
+    /// <remarks>
+    /// Note: this method is NOT meant to be called from user code!
+    /// Instead, call <see cref="ISpan.Finish()"/> on the transaction.
+    /// </remarks>
     [DebuggerStepThrough]
+    [EditorBrowsable(EditorBrowsableState.Never)]
     public static void CaptureTransaction(Transaction transaction)
         => CurrentHub.CaptureTransaction(transaction);
+
+    /// <summary>
+    /// Captures a transaction.
+    /// </summary>
+    /// <remarks>
+    /// Note: this method is NOT meant to be called from user code!
+    /// Instead, call <see cref="ISpan.Finish()"/> on the transaction.
+    /// </remarks>
+    [DebuggerStepThrough]
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public static void CaptureTransaction(Transaction transaction, Scope? scope, Hint? hint)
+        => CurrentHub.CaptureTransaction(transaction, scope, hint);
 
     /// <summary>
     /// Captures a session update.
@@ -419,7 +488,7 @@ public static partial class SentrySdk
     /// Starts a transaction.
     /// </summary>
     [DebuggerStepThrough]
-    public static ITransaction StartTransaction(
+    public static ITransactionTracer StartTransaction(
         ITransactionContext context,
         IReadOnlyDictionary<string, object?> customSamplingContext)
         => CurrentHub.StartTransaction(context, customSamplingContext);
@@ -428,7 +497,7 @@ public static partial class SentrySdk
     /// Starts a transaction.
     /// </summary>
     [DebuggerStepThrough]
-    internal static ITransaction StartTransaction(
+    internal static ITransactionTracer StartTransaction(
         ITransactionContext context,
         IReadOnlyDictionary<string, object?> customSamplingContext,
         DynamicSamplingContext? dynamicSamplingContext)
@@ -438,28 +507,28 @@ public static partial class SentrySdk
     /// Starts a transaction.
     /// </summary>
     [DebuggerStepThrough]
-    public static ITransaction StartTransaction(ITransactionContext context)
+    public static ITransactionTracer StartTransaction(ITransactionContext context)
         => CurrentHub.StartTransaction(context);
 
     /// <summary>
     /// Starts a transaction.
     /// </summary>
     [DebuggerStepThrough]
-    public static ITransaction StartTransaction(string name, string operation)
+    public static ITransactionTracer StartTransaction(string name, string operation)
         => CurrentHub.StartTransaction(name, operation);
 
     /// <summary>
     /// Starts a transaction.
     /// </summary>
     [DebuggerStepThrough]
-    public static ITransaction StartTransaction(string name, string operation, string? description)
+    public static ITransactionTracer StartTransaction(string name, string operation, string? description)
         => CurrentHub.StartTransaction(name, operation, description);
 
     /// <summary>
     /// Starts a transaction.
     /// </summary>
     [DebuggerStepThrough]
-    public static ITransaction StartTransaction(string name, string operation, SentryTraceHeader traceHeader)
+    public static ITransactionTracer StartTransaction(string name, string operation, SentryTraceHeader traceHeader)
         => CurrentHub.StartTransaction(name, operation, traceHeader);
 
     /// <summary>
@@ -480,11 +549,46 @@ public static partial class SentrySdk
         => CurrentHub.GetSpan();
 
     /// <summary>
-    /// Gets the Sentry trace header.
+    /// Gets the Sentry trace header of the parent that allows tracing across services
     /// </summary>
     [DebuggerStepThrough]
     public static SentryTraceHeader? GetTraceHeader()
         => CurrentHub.GetTraceHeader();
+
+    /// <summary>
+    /// Gets the Sentry "baggage" header that allows tracing across services
+    /// </summary>
+    [DebuggerStepThrough]
+    public static BaggageHeader? GetBaggage()
+        => CurrentHub.GetBaggage();
+
+    /// <summary>
+    /// Continues a trace based on HTTP header values provided as strings.
+    /// </summary>
+    /// <remarks>
+    /// If no "sentry-trace" header is provided a random trace ID and span ID is created.
+    /// </remarks>
+    [DebuggerStepThrough]
+    public static TransactionContext ContinueTrace(
+        string? traceHeader,
+        string? baggageHeader,
+        string? name = null,
+        string? operation = null)
+        => CurrentHub.ContinueTrace(traceHeader, baggageHeader, name, operation);
+
+    /// <summary>
+    /// Continues a trace based on HTTP header values.
+    /// </summary>
+    /// <remarks>
+    /// If no "sentry-trace" header is provided a random trace ID and span ID is created.
+    /// </remarks>
+    [DebuggerStepThrough]
+    public static TransactionContext ContinueTrace(
+        SentryTraceHeader? traceHeader,
+        BaggageHeader? baggageHeader,
+        string? name = null,
+        string? operation = null)
+        => CurrentHub.ContinueTrace(traceHeader, baggageHeader, name, operation);
 
     /// <inheritdoc cref="IHub.StartSession"/>
     [DebuggerStepThrough]
@@ -516,9 +620,9 @@ public static partial class SentrySdk
     [Obsolete("WARNING: This method deliberately causes a crash, and should not be used in a real application.")]
     public static void CauseCrash(CrashType crashType)
     {
-        var msg =
-            "This exception was caused deliberately by " +
-            $"{nameof(SentrySdk)}.{nameof(CauseCrash)}({nameof(CrashType)}.{crashType}).";
+        var info = $"{nameof(SentrySdk)}.{nameof(CauseCrash)}({nameof(CrashType)}.{crashType})";
+        var msg = $"This exception was caused deliberately by {info}.";
+        CurrentOptions?.LogDebug("Triggering a deliberate exception because {0} was called", info);
 
         switch (crashType)
         {
@@ -531,29 +635,47 @@ public static partial class SentrySdk
                 break;
 
 #if ANDROID
-                case CrashType.Java:
-                    JavaSdk.Android.Supplemental.Buggy.ThrowRuntimeException(msg);
-                    break;
+            case CrashType.Java:
+                JavaSdk.Android.Supplemental.Buggy.ThrowRuntimeException(msg);
+                break;
 
-                case CrashType.JavaBackgroundThread:
-                    JavaSdk.Android.Supplemental.Buggy.ThrowRuntimeExceptionOnBackgroundThread(msg);
-                    break;
+            case CrashType.JavaBackgroundThread:
+                JavaSdk.Android.Supplemental.Buggy.ThrowRuntimeExceptionOnBackgroundThread(msg);
+                break;
 
-                case CrashType.Native:
-                    NativeCrash();
-                    break;
+            case CrashType.Native:
+                NativeCrash();
+                break;
 #elif __IOS__
             case CrashType.Native:
                 SentryCocoaSdk.Crash();
+                break;
+#elif NET8_0_OR_GREATER
+            case CrashType.Native:
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                {
+                    NativeStrlenMSVCRT(IntPtr.Zero);
+                }
+                else
+                {
+                    NativeStrlenLibC(IntPtr.Zero);
+                }
                 break;
 #endif
             default:
                 throw new ArgumentOutOfRangeException(nameof(crashType), crashType, null);
         }
+        CurrentOptions?.LogWarning("Something went wrong in {0}, execution should never reach this.", info);
     }
 
 #if ANDROID
     [System.Runtime.InteropServices.DllImport("libsentrysupplemental.so", EntryPoint = "crash")]
     private static extern void NativeCrash();
+#elif NET8_0_OR_GREATER
+    [DllImport("msvcrt", EntryPoint = "strlen")]
+    private static extern IntPtr NativeStrlenMSVCRT(IntPtr str);
+
+    [DllImport("libc", EntryPoint = "strlen")]
+    private static extern IntPtr NativeStrlenLibC(IntPtr strt);
 #endif
 }

@@ -42,7 +42,7 @@ public partial class ScopeExtensionsTests
         {
             if (addTransaction)
             {
-                Scope.Transaction = Substitute.For<ITransaction>();
+                Scope.Transaction = Substitute.For<ITransactionTracer>();
             }
 
             var routeFeature = new RoutingFeature
@@ -67,7 +67,7 @@ public partial class ScopeExtensionsTests
         {
             if (addTransaction)
             {
-                Scope.Transaction = Substitute.For<ITransaction>();
+                Scope.Transaction = Substitute.For<ITransactionTracer>();
             }
             var routeFeature = new RoutingFeature
             {
@@ -208,6 +208,8 @@ public partial class ScopeExtensionsTests
         _sut.Populate(_httpContext, SentryAspNetCoreOptions);
 
         Assert.Equal(headers[firstKey], _sut.Request.Headers[firstKey]);
+
+        _sut.Request.Cookies.Should().Be(headers[firstKey]);
     }
 
     [Fact]

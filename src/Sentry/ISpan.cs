@@ -1,7 +1,9 @@
+using Sentry.Internal;
+
 namespace Sentry;
 
 /// <summary>
-/// Span.
+/// SpanTracer interface
 /// </summary>
 public interface ISpan : ISpanData
 {
@@ -66,13 +68,26 @@ public static class SpanExtensions
         return child;
     }
 
+    internal static ISpan StartChild(this ISpan span, SpanContext context)
+    {
+        var transaction = span.GetTransaction() as TransactionTracer;
+        if (transaction?.StartChild(context.SpanId, span.SpanId, context.Operation, context.Instrumenter)
+            is not SpanTracer childSpan)
+        {
+            return NoOpSpan.Instance;
+        }
+
+        childSpan.Description = context.Description;
+        return childSpan;
+    }
+
     /// <summary>
     /// Gets the transaction that this span belongs to.
     /// </summary>
-    public static ITransaction GetTransaction(this ISpan span) =>
+    public static ITransactionTracer GetTransaction(this ISpan span) =>
         span switch
         {
-            ITransaction transaction => transaction,
+            ITransactionTracer transaction => transaction,
             SpanTracer tracer => tracer.Transaction,
             _ => throw new ArgumentOutOfRangeException(nameof(span), span, null)
         };

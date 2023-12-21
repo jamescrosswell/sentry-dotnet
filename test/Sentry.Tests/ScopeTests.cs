@@ -1,4 +1,3 @@
-using FluentAssertions.Execution;
 namespace Sentry.Tests;
 
 public class ScopeTests
@@ -91,6 +90,20 @@ public class ScopeTests
     }
 
     [Fact]
+    public void Clone_NewScope_IncludesPropagationContext()
+    {
+        var options = new SentryOptions();
+        var propagationContext = new SentryPropagationContext();
+        var sut = new Scope(options, propagationContext);
+
+        var clone = sut.Clone();
+
+        Assert.NotSame(propagationContext, clone); // Sanity check that it really is a clone
+        Assert.Equal(propagationContext.TraceId, clone.PropagationContext.TraceId);
+        Assert.Equal(propagationContext.SpanId, clone.PropagationContext.SpanId);
+    }
+
+    [Fact]
     public void Clone_CopiesFields()
     {
         _sut.Environment = "test";
@@ -164,7 +177,7 @@ public class ScopeTests
     }
 
     [Fact]
-    public void GetSpan_NoSpans_ReturnsTransaction()
+    public void Span_NoSpans_ReturnsTransaction()
     {
         // Arrange
         var scope = new Scope();
@@ -172,14 +185,14 @@ public class ScopeTests
         scope.Transaction = transaction;
 
         // Act
-        var span = scope.GetSpan();
+        var span = scope.Span;
 
         // Assert
         span.Should().Be(transaction);
     }
 
     [Fact]
-    public void GetSpan_FinishedSpans_ReturnsTransaction()
+    public void Span_FinishedSpans_ReturnsTransaction()
     {
         // Arrange
         var scope = new Scope();
@@ -191,14 +204,14 @@ public class ScopeTests
         scope.Transaction = transaction;
 
         // Act
-        var span = scope.GetSpan();
+        var span = scope.Span;
 
         // Assert
         span.Should().Be(transaction);
     }
 
     [Fact]
-    public void GetSpan_ActiveSpans_ReturnsSpan()
+    public void Span_ActiveSpans_ReturnsSpan()
     {
         // Arrange
         var scope = new Scope();
@@ -210,10 +223,71 @@ public class ScopeTests
         scope.Transaction = transaction;
 
         // Act
-        var span = scope.GetSpan();
+        var span = scope.Span;
 
         // Assert
         span.Should().Be(activeSpan);
+    }
+
+    [Fact]
+    public void Span_SetSpan_ReturnsValue()
+    {
+        // Arrange
+        var scope = new Scope();
+
+        var transaction = new TransactionTracer(DisabledHub.Instance, "foo", "_");
+        var firstSpan = transaction.StartChild("123");
+        var secondSpan = firstSpan.StartChild("456");
+
+        scope.Transaction = transaction;
+
+        // Assert Default
+        scope.Span.Should().Be(secondSpan);
+
+        // Act
+        scope.Span = firstSpan;
+
+        // Assert
+        scope.Span.Should().Be(firstSpan);
+    }
+
+    [Fact]
+    public void Span_SetSpanNull_ReturnsLatestOpen()
+    {
+        // Arrange
+        var scope = new Scope();
+
+        var transaction = new TransactionTracer(DisabledHub.Instance, "foo", "_");
+        var firstSpan = transaction.StartChild("123");
+        var secondSpan = firstSpan.StartChild("456");
+
+        scope.Transaction = transaction;
+
+        // Act
+        scope.Span = null;
+
+        // Assert
+        scope.Span.Should().Be(secondSpan);
+    }
+
+    [Fact]
+    public void Span_SetSpanThenCloseIt_ReturnsLatestOpen()
+    {
+        // Arrange
+        var scope = new Scope();
+
+        var transaction = new TransactionTracer(DisabledHub.Instance, "foo", "_");
+        var firstSpan = transaction.StartChild("123");
+        var secondSpan = firstSpan.StartChild("456");
+
+        scope.Transaction = transaction;
+
+        // Act
+        scope.Span = firstSpan;
+        firstSpan.Finish();
+
+        // Assert
+        scope.Span.Should().Be(secondSpan);
     }
 
     [Fact]
@@ -247,6 +321,18 @@ public class ScopeTests
         {
             _sut.ShouldBeEquivalentTo(new Scope());
         }
+    }
+
+    [Fact]
+    public void Clear_ResetsPropagationContext()
+    {
+        var options = new SentryOptions();
+        var propagationContext = new SentryPropagationContext();
+        var sut = new Scope(options, propagationContext);
+
+        sut.Clear();
+
+        Assert.NotSame(propagationContext, sut.PropagationContext);
     }
 
     [Fact]
@@ -307,6 +393,50 @@ public class ScopeTests
 
         // Assert
         Assert.Equal(expectedCount, scope.Breadcrumbs.Count);
+    }
+
+    [Fact]
+    public void AddBreadcrumb_BeforeAddBreadcrumb_ReceivesHint()
+    {
+        // Arrange
+        var options = new SentryOptions();
+        Hint receivedHint = null;
+        options.SetBeforeBreadcrumb((breadcrumb, hint) =>
+        {
+            receivedHint = hint;
+            return breadcrumb;
+        });
+        var scope = new Scope(options);
+
+        // Act
+        var expectedHint = new Hint();
+        scope.AddBreadcrumb(new Breadcrumb(), expectedHint);
+
+        // Assert
+        receivedHint.Should().BeSameAs(expectedHint);
+    }
+
+    [Fact]
+    public void AddBreadcrumb_ScopeAttachments_Copied_To_Hint()
+    {
+        // Arrange
+        var options = new SentryOptions();
+        Hint hint = null;
+        options.SetBeforeBreadcrumb((b, h) =>
+        {
+            hint = h;
+            return b;
+        });
+        var scope = new Scope(options);
+        scope.AddAttachment(AttachmentHelper.FakeAttachment("foo.txt"));
+        scope.AddAttachment(AttachmentHelper.FakeAttachment("bar.txt"));
+
+        // Act
+        scope.AddBreadcrumb(new Breadcrumb());
+
+        // Assert
+        hint.Should().NotBeNull();
+        hint.Attachments.Should().Contain(scope.Attachments);
     }
 
     [Theory]
@@ -462,6 +592,29 @@ public class ScopeTests
         // Assert
         observer.Received(expectedCount).AddBreadcrumb(Arg.Is(breadcrumb));
     }
+
+    [Fact]
+    public void Filtered_tags_are_not_set()
+    {
+        var tags = new List<KeyValuePair<string, string>>
+        {
+            new("AzFunctions", "rule"),
+            new("AzureFunctions_FunctionName", "Func"),
+            new("AzureFunctions_InvocationId", "20a09c3b-e9dd-43fe-9a73-ebae1f90cab6"),
+        };
+
+        var scope = new Scope(new SentryOptions
+        {
+            TagFilters = new[] { new SubstringOrRegexPattern("AzureFunctions_") }
+        });
+
+        foreach (var (key, value) in tags)
+        {
+            scope.SetTag(key, value);
+        }
+
+        scope.Tags.Should().OnlyContain(pair => pair.Key == "AzFunctions" && pair.Value == "rule");
+    }
 }
 
 public static class ScopeTestExtensions
@@ -471,12 +624,11 @@ public static class ScopeTestExtensions
         scope.Request = new() { Data = $"{salt} request" };
         scope.Contexts.Add($"{salt} context", "{}");
         scope.User = new User() { Username = $"{salt} username" };
-        scope.Platform = $"{salt} platform";
         scope.Release = $"{salt} release";
         scope.Distribution = $"{salt} distribution";
         scope.Environment = $"{salt} environment";
         scope.TransactionName = $"{salt} transaction";
-        scope.Transaction = Substitute.For<ITransaction>();
+        scope.Transaction = Substitute.For<ITransactionTracer>();
         scope.Fingerprint = new[] { $"{salt} fingerprint" };
         scope.AddBreadcrumb(new(message: $"{salt} breadcrumb"));
         scope.SetExtra("extra", $"{salt} extra");
@@ -490,7 +642,6 @@ public static class ScopeTestExtensions
         source.Request.Should().BeEquivalentTo(target.Request);
         source.Contexts.Should().BeEquivalentTo(target.Contexts);
         source.User.Should().BeEquivalentTo(target.User);
-        source.Platform.Should().Be(target.Platform);
         source.Release.Should().Be(target.Release);
         source.Distribution.Should().Be(target.Distribution);
         source.Environment.Should().Be(target.Environment);

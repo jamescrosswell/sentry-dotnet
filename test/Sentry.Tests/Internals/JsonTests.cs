@@ -7,6 +7,9 @@ public class JsonTests
     public JsonTests(ITestOutputHelper output)
     {
         _testOutputLogger = Substitute.ForPartsOf<TestOutputDiagnosticLogger>(output);
+#if NET6_0_OR_GREATER
+        JsonExtensions.AddJsonSerializerContext(o => new JsonTestsJsonContext(o));
+#endif
     }
 
     public static Exception GenerateException(string description)
@@ -21,7 +24,7 @@ public class JsonTests
         }
     }
 
-    private class DataAndNonSerializableObject<T>
+    internal class DataAndNonSerializableObject<T>
     {
         /// <summary>
         /// A class containing two objects that can be serialized and a third one that will have issues if serialized.
@@ -60,7 +63,7 @@ public class JsonTests
         public int? HResult { get; set; }
     }
 
-    private class DataWithSerializableObject<T> : DataAndNonSerializableObject<T>
+    internal class DataWithSerializableObject<T> : DataAndNonSerializableObject<T>
     {
         /// <summary>
         /// A class containing three objects that can be serialized.
@@ -73,25 +76,34 @@ public class JsonTests
     public void WriteDynamicValue_ExceptionParameter_SerializedException()
     {
         // Arrange
-        var expectedMessage = "T est";
-        var expectedData = new KeyValuePair<string, string>("a", "b");
-        var ex = GenerateException(expectedMessage);
-        ex.Data.Add(expectedData.Key, expectedData.Value);
-        var expectedStackTrace = ex.StackTrace.ToJsonString(_testOutputLogger);
-        var expectedSerializedData = new[]
-        {
-            $"\"Message\":\"{expectedMessage}\"",
-            "\"Data\":{\"" + expectedData.Key + "\":\"" + expectedData.Value + "\"}",
-            "\"InnerException\":null",
-            "\"Source\":\"Sentry.Tests\"",
-            $"\"StackTrace\":{expectedStackTrace}"
-        };
+        var ex = GenerateException("Test");
+        ex.Data.Add("a", "b");
 
         // Act
         var serializedString = ex.ToJsonString(_testOutputLogger);
 
         // Assert
-        Assert.All(expectedSerializedData, expectedData => Assert.Contains(expectedData, serializedString));
+        var expectedStackTraceString = ex.StackTrace.ToJsonString();
+        var expectedSerializedData = new[]
+        {
+            """
+            "Message":"Test"
+            """,
+            """
+            "Data":{"a":"b"}
+            """,
+            """
+            "InnerException":null
+            """,
+            """
+            "Source":"Sentry.Tests"
+            """,
+            $"""
+            "StackTrace":{expectedStackTraceString}
+            """
+        };
+
+        Assert.All(expectedSerializedData, expected => Assert.Contains(expected, serializedString));
     }
 
     [Fact]
@@ -143,32 +155,27 @@ public class JsonTests
         // Arrange
         var type = typeof(List<>).GetGenericArguments()[0];
         var data = new DataWithSerializableObject<Type>(type);
-        var expectedSerializedData =
-            "{" +
-            "\"Id\":1," +
-            "\"Data\":\"1234\"," +
-            "\"Object\":null" + //This type has no Full Name.
-            "}";
 
         // Act
         var serializedString = data.ToJsonString(_testOutputLogger);
 
         // Assert
-        Assert.Equal(expectedSerializedData, serializedString);
+        const string expected = """{"Id":1,"Data":"1234","Object":null}""";
+        Assert.Equal(expected, serializedString);
     }
 
     [Fact]
     public void WriteDynamicValue_ClassWithAssembly_SerializedClassWithNullAssembly()
     {
         // Arrange
-        var expectedSerializedData = "{\"Id\":1,\"Data\":\"1234\",\"Object\":null}";
         var data = new DataAndNonSerializableObject<Assembly>(AppDomain.CurrentDomain.GetAssemblies()[0]);
 
         // Act
         var serializedString = data.ToJsonString(_testOutputLogger);
 
         // Assert
-        Assert.Equal(expectedSerializedData, serializedString);
+        const string expected = """{"Id":1,"Data":"1234","Object":null}""";
+        Assert.Equal(expected, serializedString);
     }
 
     [Theory]
@@ -216,7 +223,7 @@ public class JsonTests
         var json = Encoding.UTF8.GetString(stream.ToArray());
 
         // Assert
-        Assert.Equal("{\"property_name\":{\"$id\":\"1\",\"Object\":{\"$ref\":\"1\"}}}", json);
+        Assert.Equal("""{"property_name":{"$id":"1","Object":{"$ref":"1"}}}""", json);
     }
 
     public static IEnumerable<object[]> NonSerializableObjectTestData =>
@@ -238,3 +245,15 @@ public class JsonTests
         public SelfReferencedObject Object => this;
     }
 }
+
+#if NET6_0_OR_GREATER
+[JsonSerializable(typeof(AccessViolationException))]
+[JsonSerializable(typeof(Exception))]
+[JsonSerializable(typeof(JsonTests.DataAndNonSerializableObject<Assembly>))]
+[JsonSerializable(typeof(JsonTests.DataWithSerializableObject<Exception>))]
+[JsonSerializable(typeof(JsonTests.SelfReferencedObject))]
+[JsonSerializable(typeof(JsonTests.DataWithSerializableObject<Type>))]
+internal partial class JsonTestsJsonContext : JsonSerializerContext
+{
+}
+#endif

@@ -30,35 +30,43 @@ public class SentryStackFrameTests
             Platform = "Platform",
             ImageAddress = 3,
             SymbolAddress = 4,
-            InstructionOffset = 5,
-            InstructionAddress = "0xffffffff",
+            InstructionAddress = 5,
             AddressMode = "rel:0"
         };
 
-        var actual = sut.ToJsonString(_testOutputLogger);
+        var actual = sut.ToJsonString(_testOutputLogger, indented: true);
 
-        Assert.Equal(
-            "{" +
-            "\"pre_context\":[\"pre\"]," +
-            "\"post_context\":[\"post\"]," +
-            "\"vars\":{\"var\":\"val\"}," +
-            "\"frames_omitted\":[1,2]," +
-            "\"filename\":\"FileName\"," +
-            "\"function\":\"Function\"," +
-            "\"module\":\"Module\"," +
-            "\"lineno\":1," +
-            "\"colno\":2," +
-            "\"abs_path\":\"AbsolutePath\"," +
-            "\"context_line\":\"ContextLine\"," +
-            "\"in_app\":true," +
-            "\"package\":\"Package\"," +
-            "\"platform\":\"Platform\"," +
-            "\"image_addr\":\"0x3\"," +
-            "\"symbol_addr\":\"0x4\"," +
-            "\"instruction_addr\":\"0xffffffff\"," +
-            "\"instruction_offset\":5," +
-            "\"addr_mode\":\"rel:0\"" +
-            "}",
+        Assert.Equal("""
+            {
+              "pre_context": [
+                "pre"
+              ],
+              "post_context": [
+                "post"
+              ],
+              "vars": {
+                "var": "val"
+              },
+              "frames_omitted": [
+                1,
+                2
+              ],
+              "filename": "FileName",
+              "function": "Function",
+              "module": "Module",
+              "lineno": 1,
+              "colno": 2,
+              "abs_path": "AbsolutePath",
+              "context_line": "ContextLine",
+              "in_app": true,
+              "package": "Package",
+              "platform": "Platform",
+              "image_addr": "0x3",
+              "symbol_addr": "0x4",
+              "instruction_addr": "0x5",
+              "addr_mode": "rel:0"
+            }
+            """,
             actual);
 
         var parsed = Json.Parse(actual, SentryStackFrame.FromJson);
@@ -205,4 +213,37 @@ public class SentryStackFrameTests
         // Assert
         Assert.True(sut.InApp, "InApp started as true but ConfigureAppFrame changed it to false.");
     }
+
+    [Fact]
+    public void ConfigureAppFrame_NativeAOTWithoutMethodInfo_InAppIsNull()
+    {
+        // See values set by TryCreateNativeAOTFrame
+        var sut = new SentryStackFrame
+        {
+            ImageAddress = 1,
+            InstructionAddress = 2
+        };
+
+        // Act
+        sut.ConfigureAppFrame(new());
+
+        // Assert
+        Assert.Null(sut.InApp);
+    }
+
+#if NET8_0_OR_GREATER
+    [Fact]
+    public void ConfigureAppFrame_NativeAOTWithoutMethodInfo_InAppIsSet()
+    {
+        var sut = DebugStackTrace.ParseNativeAOTToString(
+            "System.Runtime.CompilerServices.TaskAwaiter.HandleNonSuccessAndDebuggerNotification(Task) + 0x42 at offset 66 in file:line:column <filename unknown>:0:0");
+        sut.ConfigureAppFrame(new());
+        Assert.False(sut.InApp);
+
+        sut = DebugStackTrace.ParseNativeAOTToString(
+            "Program.<<Main>$>d__0.MoveNext() + 0xdd at offset 221 in file:line:column <filename unknown>:0:0");
+        sut.ConfigureAppFrame(new());
+        Assert.True(sut.InApp);
+    }
+#endif
 }

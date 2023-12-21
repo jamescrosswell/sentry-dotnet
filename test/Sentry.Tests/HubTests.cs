@@ -1,4 +1,5 @@
 using Sentry.Internal.Http;
+using Sentry.Internal.OpenTelemetry;
 
 namespace Sentry.Tests;
 
@@ -10,7 +11,7 @@ public partial class HubTests
     {
         public SentryOptions Options { get; }
 
-        public ISentryClient Client { get; }
+        public ISentryClient Client { get; set; }
 
         public ISessionManager SessionManager { get; set; }
 
@@ -23,6 +24,7 @@ public partial class HubTests
             Options = new SentryOptions
             {
                 Dsn = ValidDsn,
+                EnableTracing = true,
                 AutoSessionTracking = false
             };
 
@@ -126,7 +128,7 @@ public partial class HubTests
             Arg.Is<SentryEvent>(evt =>
                 evt.Contexts.Trace.TraceId == transaction.TraceId &&
                 evt.Contexts.Trace.SpanId == transaction.SpanId),
-            Arg.Any<Scope>());
+            Arg.Any<Scope>(), Arg.Any<Hint>());
     }
 
     [Fact]
@@ -148,7 +150,46 @@ public partial class HubTests
             Arg.Is<SentryEvent>(evt =>
                 evt.Contexts.Trace.TraceId == transaction.TraceId &&
                 evt.Contexts.Trace.SpanId == transaction.SpanId),
-            Arg.Any<Scope>());
+            Arg.Any<Scope>(), Arg.Any<Hint>());
+    }
+
+    [Fact]
+    public void CaptureException_TransactionFinished_Gets_DSC_From_LinkedSpan()
+    {
+        // Arrange
+        _fixture.Options.TracesSampleRate = 1.0;
+        var hub = _fixture.GetSut();
+        var exception = new Exception("error");
+
+        var traceHeader = new SentryTraceHeader(
+            SentryId.Parse("75302ac48a024bde9a3b3734a82e36c8"),
+            SpanId.Parse("2000000000000000"),
+            true);
+        var transactionContext = new TransactionContext("foo", "bar", traceHeader);
+
+        var dsc = BaggageHeader.Create(new List<KeyValuePair<string, string>>
+        {
+            {"sentry-sample_rate", "1.0"},
+            {"sentry-trace_id", "75302ac48a024bde9a3b3734a82e36c8"},
+            {"sentry-public_key", "d4d82fc1c2c4032a83f3a29aa3a3aff"},
+            {"sentry-replay_id","bfd31b89a59d41c99d96dc2baf840ecd"}
+        }).CreateDynamicSamplingContext();
+
+        var transaction = hub.StartTransaction(
+            transactionContext,
+            new Dictionary<string, object>(),
+            dsc
+            );
+        transaction.Finish(exception);
+
+        // Act
+        hub.CaptureException(exception);
+
+        // Assert
+        _fixture.Client.Received(1).CaptureEvent(
+            Arg.Is<SentryEvent>(evt =>
+                evt.DynamicSamplingContext == dsc),
+            Arg.Any<Scope>(), Arg.Any<Hint>());
     }
 
     [Fact]
@@ -170,15 +211,16 @@ public partial class HubTests
             Arg.Is<SentryEvent>(evt =>
                 evt.Contexts.Trace.TraceId == default &&
                 evt.Contexts.Trace.SpanId == default),
-            Arg.Any<Scope>());
+            Arg.Any<Scope>(), Arg.Any<Hint>());
     }
 
     [Fact]
-    public void CaptureException_NoActiveSpanAndNoSpanBoundToSameException_EventIsNotLinkedToSpan()
+    public void CaptureException_NoActiveSpanAndNoSpanBoundToSameException_EventContainsPropagationContext()
     {
         // Arrange
         _fixture.Options.TracesSampleRate = 1.0;
         var hub = _fixture.GetSut();
+        var scope = hub.ScopeManager.GetCurrent().Key;
 
         // Act
         hub.CaptureException(new Exception("error"));
@@ -186,9 +228,9 @@ public partial class HubTests
         // Assert
         _fixture.Client.Received(1).CaptureEvent(
             Arg.Is<SentryEvent>(evt =>
-                evt.Contexts.Trace.TraceId == default &&
-                evt.Contexts.Trace.SpanId == default),
-            Arg.Any<Scope>());
+                evt.Contexts.Trace.TraceId == scope.PropagationContext.TraceId &&
+                evt.Contexts.Trace.SpanId == scope.PropagationContext.SpanId),
+            Arg.Any<Scope>(), Arg.Any<Hint>());
     }
 
     [Fact]
@@ -228,7 +270,7 @@ public partial class HubTests
         Assert.Equal(child.ParentSpanId, evt.Contexts.Trace.ParentSpanId);
     }
 
-    private class EvilContext
+    internal class EvilContext
     {
         // This property will throw an exception during serialization.
         // ReSharper disable once UnusedMember.Local
@@ -253,11 +295,14 @@ public partial class HubTests
 
     private async Task CapturesEventWithContextKey_Implementation(bool offlineCaching)
     {
+#if NET6_0_OR_GREATER
+        JsonExtensions.AddJsonSerializerContext(o => new HubTestsJsonContext(o));
+#endif
         var tcs = new TaskCompletionSource<bool>();
         var expectedMessage = Guid.NewGuid().ToString();
 
         var requests = new List<string>();
-        async Task VerifyAsync(HttpRequestMessage message)
+        async Task Verify(HttpRequestMessage message)
         {
             var payload = await message.Content!.ReadAsStringAsync();
             requests.Add(payload);
@@ -281,9 +326,9 @@ public partial class HubTests
             // To go through a round trip serialization of cached envelope
             CacheDirectoryPath = tempDirectory?.Path,
             FileSystem = fileSystem,
-            // So we don't need to deal with gzip'ed payload
+            // So we don't need to deal with gzip payloads
             RequestBodyCompressionLevel = CompressionLevel.NoCompression,
-            CreateHttpClientHandler = () => new CallbackHttpClientHandler(VerifyAsync),
+            CreateHttpMessageHandler = () => new CallbackHttpClientHandler(Verify),
             // Not to send some session envelope
             AutoSessionTracking = false,
             Debug = true,
@@ -342,23 +387,6 @@ public partial class HubTests
 #endif
 
     [Fact]
-    public void CaptureEvent_SessionActive_ExceptionReportsError()
-    {
-        // Arrange
-        _fixture.Options.Release = "release";
-        var hub = _fixture.GetSut();
-
-        hub.StartSession();
-
-        // Act
-        hub.CaptureEvent(new SentryEvent(new Exception()));
-        hub.EndSession();
-
-        // Assert
-        _fixture.Client.Received().CaptureSession(Arg.Is<SessionUpdate>(s => s.ErrorCount == 1));
-    }
-
-    [Fact]
     public void CaptureEvent_ActiveSession_UnhandledExceptionSessionEndedAsCrashed()
     {
         // Arrange
@@ -369,8 +397,9 @@ public partial class HubTests
             Dsn = ValidDsn,
             Release = "release"
         };
-        var client = new SentryClient(options, worker);
-        var hub = new Hub(options, client);
+        var sessionManager = new GlobalSessionManager(options);
+        var client = new SentryClient(options, worker, sessionManager: sessionManager);
+        var hub = new Hub(options, client, sessionManager);
 
         hub.StartSession();
 
@@ -403,6 +432,23 @@ public partial class HubTests
     }
 
     [Fact]
+    public void CaptureEvent_Client_GetsHint()
+    {
+        // Arrange
+        var @event = new SentryEvent();
+        var hint = new Hint();
+        var hub = _fixture.GetSut();
+
+        // Act
+        hub.CaptureEvent(@event, hint: hint);
+
+        // Assert
+        _fixture.Client.Received(1).CaptureEvent(
+            Arg.Any<SentryEvent>(),
+            Arg.Any<Scope>(), Arg.Is<Hint>(h => h == hint));
+    }
+
+    [Fact]
     public void AppDomainUnhandledExceptionIntegration_ActiveSession_UnhandledExceptionSessionEndedAsCrashed()
     {
         // Arrange
@@ -413,8 +459,9 @@ public partial class HubTests
             Dsn = ValidDsn,
             Release = "release"
         };
-        var client = new SentryClient(options, worker);
-        var hub = new Hub(options, client);
+        var sessionManager = new GlobalSessionManager(options);
+        var client = new SentryClient(options, worker, sessionManager: sessionManager);
+        var hub = new Hub(options, client, sessionManager);
 
         var integration = new AppDomainUnhandledExceptionIntegration(Substitute.For<IAppDomain>());
         integration.Register(hub, options);
@@ -568,6 +615,46 @@ public partial class HubTests
 
         // Assert
         transaction.IsSampled.Should().BeFalse();
+    }
+
+    [Fact]
+    public void StartTransaction_SameInstrumenter_SampledIn()
+    {
+        // Arrange
+        _fixture.Options.EnableTracing = true;
+        _fixture.Options.Instrumenter = Instrumenter.Sentry; // The default... making it explicit for this test though
+        var hub = _fixture.GetSut();
+
+        var transactionContext = new TransactionContext("name", "operation")
+        {
+            Instrumenter = _fixture.Options.Instrumenter
+        };
+
+        // Act
+        var transaction = hub.StartTransaction(transactionContext);
+
+        // Assert
+        transaction.IsSampled.Should().BeTrue();
+    }
+
+    [Fact]
+    public void StartTransaction_DifferentInstrumenter_NoOp()
+    {
+        // Arrange
+        _fixture.Options.EnableTracing = true;
+        _fixture.Options.Instrumenter = Instrumenter.OpenTelemetry;
+        var hub = _fixture.GetSut();
+
+        var transactionContext = new TransactionContext("name", "operation")
+        {
+            Instrumenter = Instrumenter.Sentry // The default... making it explicit for this test though
+        };
+
+        // Act
+        var transaction = hub.StartTransaction(transactionContext);
+
+        // Assert
+        transaction.Should().Be(NoOpTransaction.Instance);
     }
 
     [Fact]
@@ -746,7 +833,7 @@ public partial class HubTests
         var transaction = hub.StartTransaction("foo", "bar");
 
         // Act
-        hub.WithScope(scope =>
+        hub.ConfigureScope(scope =>
         {
             scope.Transaction = transaction;
 
@@ -754,10 +841,130 @@ public partial class HubTests
 
             // Assert
             header.Should().NotBeNull();
-            header?.SpanId.Should().Be(transaction.SpanId);
-            header?.TraceId.Should().Be(transaction.TraceId);
-            header?.IsSampled.Should().Be(transaction.IsSampled);
+            header.SpanId.Should().Be(transaction.SpanId);
+            header.TraceId.Should().Be(transaction.TraceId);
+            header.IsSampled.Should().Be(transaction.IsSampled);
         });
+    }
+
+    [Fact]
+    public void GetTraceHeader_NoSpanActive_ReturnsHeaderFromPropagationContext()
+    {
+        // Arrange
+        var hub = _fixture.GetSut();
+        var propagationContext = new SentryPropagationContext(
+            SentryId.Parse("75302ac48a024bde9a3b3734a82e36c8"),
+            SpanId.Parse("2000000000000000"));
+        hub.ConfigureScope(scope => scope.PropagationContext = propagationContext);
+
+        // Act
+        var header = hub.GetTraceHeader();
+
+        // Assert
+        header.Should().NotBeNull();
+        header.SpanId.Should().Be(propagationContext.SpanId);
+        header.TraceId.Should().Be(propagationContext.TraceId);
+        header.IsSampled.Should().BeNull();
+    }
+
+    [Fact]
+    public void GetBaggage_SpanActive_ReturnsBaggageFromSpan()
+    {
+        // Arrange
+        var hub = _fixture.GetSut();
+        var transaction = hub.StartTransaction("test-name", "_");
+
+        // Act
+        hub.ConfigureScope(scope =>
+        {
+            scope.Transaction = transaction;
+
+            var baggage = hub.GetBaggage();
+
+            // Assert
+            baggage.Should().NotBeNull();
+            Assert.Contains("test-name", baggage!.ToString());
+        });
+    }
+
+    [Fact]
+    public void GetBaggage_NoSpanActive_ReturnsBaggageFromPropagationContext()
+    {
+        // Arrange
+        var hub = _fixture.GetSut();
+        var propagationContext = new SentryPropagationContext(
+            SentryId.Parse("43365712692146d08ee11a729dfbcaca"), SpanId.Parse("1000000000000000"));
+        hub.ConfigureScope(scope => scope.PropagationContext = propagationContext);
+
+        // Act
+        var baggage = hub.GetBaggage();
+
+        // Assert
+        baggage.Should().NotBeNull();
+        Assert.Contains("43365712692146d08ee11a729dfbcaca", baggage!.ToString());
+    }
+
+    [Fact]
+    public void ContinueTrace_SetsPropagationContextAndReturnsTransactionContext()
+    {
+        // Arrange
+        var hub = _fixture.GetSut();
+        var propagationContext = new SentryPropagationContext(
+            SentryId.Parse("43365712692146d08ee11a729dfbcaca"), SpanId.Parse("1000000000000000"));
+        hub.ConfigureScope(scope => scope.PropagationContext = propagationContext);
+
+        var traceHeader = new SentryTraceHeader(SentryId.Parse("5bd5f6d346b442dd9177dce9302fd737"),
+            SpanId.Parse("2000000000000000"), null);
+        var baggageHeader = BaggageHeader.Create(new List<KeyValuePair<string, string>>
+        {
+            {"sentry-trace_id", "5bd5f6d346b442dd9177dce9302fd737"},
+            {"sentry-public_key", "49d0f7386ad645858ae85020e393bef3"},
+            {"sentry-sample_rate", "1.0"}
+        });
+
+        hub.ConfigureScope(scope => scope.PropagationContext.TraceId.Should().Be("43365712692146d08ee11a729dfbcaca")); // Sanity check
+
+        // Act
+        var transactionContext = hub.ContinueTrace(traceHeader, baggageHeader, "test-name");
+
+        // Assert
+        hub.ConfigureScope(scope =>
+        {
+            scope.PropagationContext.TraceId.Should().Be(SentryId.Parse("5bd5f6d346b442dd9177dce9302fd737"));
+            scope.PropagationContext.ParentSpanId.Should().Be(SpanId.Parse("2000000000000000"));
+            Assert.NotNull(scope.PropagationContext._dynamicSamplingContext);
+        });
+
+        transactionContext.TraceId.Should().Be(SentryId.Parse("5bd5f6d346b442dd9177dce9302fd737"));
+        transactionContext.ParentSpanId.Should().Be(SpanId.Parse("2000000000000000"));
+    }
+
+    [Fact]
+    public void ContinueTrace_ReceivesHeadersAsStrings_SetsPropagationContextAndReturnsTransactionContext()
+    {
+        // Arrange
+        var hub = _fixture.GetSut();
+        var propagationContext = new SentryPropagationContext(
+            SentryId.Parse("43365712692146d08ee11a729dfbcaca"), SpanId.Parse("1000000000000000"));
+        hub.ConfigureScope(scope => scope.PropagationContext = propagationContext);
+        var traceHeader = "5bd5f6d346b442dd9177dce9302fd737-2000000000000000";
+        var baggageHeader = "sentry-trace_id=5bd5f6d346b442dd9177dce9302fd737, sentry-public_key=49d0f7386ad645858ae85020e393bef3, sentry-sample_rate=1.0";
+
+        hub.ConfigureScope(scope => scope.PropagationContext.TraceId.Should().Be("43365712692146d08ee11a729dfbcaca")); // Sanity check
+
+        // Act
+        var transactionContext = hub.ContinueTrace(traceHeader, baggageHeader, "test-name");
+
+        // Assert
+        hub.ConfigureScope(scope =>
+        {
+            scope.PropagationContext.TraceId.Should().Be(SentryId.Parse("5bd5f6d346b442dd9177dce9302fd737"));
+            scope.PropagationContext.ParentSpanId.Should().Be(SpanId.Parse("2000000000000000"));
+            Assert.NotNull(scope.PropagationContext._dynamicSamplingContext);
+        });
+
+        transactionContext.TraceId.Should().Be(SentryId.Parse("5bd5f6d346b442dd9177dce9302fd737"));
+        transactionContext.ParentSpanId.Should().Be(SpanId.Parse("2000000000000000"));
     }
 
     [Fact]
@@ -767,13 +974,157 @@ public partial class HubTests
         var hub = _fixture.GetSut();
         var transaction = hub.StartTransaction("foo", "bar");
 
-        hub.WithScope(scope => scope.Transaction = transaction);
+        hub.ConfigureScope(scope => scope.Transaction = transaction);
 
         // Act
         transaction.Finish();
 
         // Assert
-        hub.WithScope(scope => scope.Transaction.Should().BeNull());
+        hub.ConfigureScope(scope => scope.Transaction.Should().BeNull());
+    }
+
+#nullable enable
+    private class ThrowingProfilerFactory : ITransactionProfilerFactory
+    {
+        public ITransactionProfiler? Start(ITransactionTracer _, CancellationToken __) => new ThrowingProfiler();
+    }
+
+    internal class ThrowingProfiler : ITransactionProfiler
+    {
+        public void Finish() { }
+
+        public Sentry.Protocol.Envelopes.ISerializable Collect(Transaction _) => throw new Exception("test");
+    }
+
+    private class AsyncThrowingProfilerFactory : ITransactionProfilerFactory
+    {
+        public ITransactionProfiler? Start(ITransactionTracer _, CancellationToken __) => new AsyncThrowingProfiler();
+    }
+
+    internal class AsyncThrowingProfiler : ITransactionProfiler
+    {
+        public void Finish() { }
+
+        public Sentry.Protocol.Envelopes.ISerializable Collect(Transaction transaction)
+            => AsyncJsonSerializable.CreateFrom(CollectAsync(transaction));
+
+        private async Task<ProfileInfo> CollectAsync(Transaction transaction)
+        {
+            await Task.Delay(1);
+            throw new Exception("test");
+        }
+    }
+    private class TestProfilerFactory : ITransactionProfilerFactory
+    {
+        public ITransactionProfiler? Start(ITransactionTracer _, CancellationToken __) => new TestProfiler();
+    }
+
+    internal class TestProfiler : ITransactionProfiler
+    {
+        public void Finish() { }
+
+        public Sentry.Protocol.Envelopes.ISerializable Collect(Transaction _) => new JsonSerializable(new ProfileInfo());
+    }
+
+#nullable disable
+
+    [Fact]
+    public async Task CaptureTransaction_WithSyncThrowingTransactionProfiler_DoesntSendTransaction()
+    {
+        // Arrange
+        var transport = new FakeTransport();
+        using var hub = new Hub(new SentryOptions
+        {
+            Dsn = ValidDsn,
+            AutoSessionTracking = false,
+            TracesSampleRate = 1.0,
+            ProfilesSampleRate = 1.0,
+            Transport = transport,
+            TransactionProfilerFactory = new ThrowingProfilerFactory()
+        });
+
+        // Act
+        hub.StartTransaction("foo", "bar").Finish();
+        await hub.FlushAsync();
+
+        // Assert
+        transport.GetSentEnvelopes().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task CaptureTransaction_WithAsyncThrowingTransactionProfiler_SendsTransactionWithoutProfile()
+    {
+        // Arrange
+        var transport = new FakeTransport();
+        var logger = new TestOutputDiagnosticLogger(_output);
+        using var hub = new Hub(new SentryOptions
+        {
+            Dsn = ValidDsn,
+            AutoSessionTracking = false,
+            TracesSampleRate = 1.0,
+            ProfilesSampleRate = 1.0,
+            Transport = transport,
+            TransactionProfilerFactory = new AsyncThrowingProfilerFactory(),
+            DiagnosticLogger = logger,
+        });
+
+        // Act
+        hub.StartTransaction("foo", "bar").Finish();
+        await hub.FlushAsync();
+
+        // Assert
+        transport.GetSentEnvelopes().Should().HaveCount(1);
+        var envelope = transport.GetSentEnvelopes().Single();
+
+        using var stream = new MemoryStream();
+        envelope.Serialize(stream, logger);
+        stream.Flush();
+        var envelopeStr = Encoding.UTF8.GetString(stream.ToArray());
+        var lines = envelopeStr.Split('\n');
+        lines.Should().HaveCount(4);
+        lines[0].Should().StartWith("{\"sdk\"");
+        lines[1].Should().StartWith("{\"type\":\"transaction\",\"length\":");
+        lines[2].Should().StartWith("{\"type\":\"transaction\"");
+        lines[3].Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task CaptureTransaction_WithTransactionProfiler_SendsTransactionWithProfile()
+    {
+        // Arrange
+        var transport = new FakeTransport();
+        var logger = new TestOutputDiagnosticLogger(_output);
+        using var hub = new Hub(new SentryOptions
+        {
+            Dsn = ValidDsn,
+            AutoSessionTracking = false,
+            TracesSampleRate = 1.0,
+            ProfilesSampleRate = 1.0,
+            Transport = transport,
+            TransactionProfilerFactory = new TestProfilerFactory(),
+            DiagnosticLogger = logger,
+        });
+
+        // Act
+        hub.StartTransaction("foo", "bar").Finish();
+        await hub.FlushAsync();
+
+        // Assert
+        transport.GetSentEnvelopes().Should().HaveCount(1);
+        var envelope = transport.GetSentEnvelopes().Single();
+
+        using var stream = new MemoryStream();
+        envelope.Serialize(stream, logger);
+        stream.Flush();
+        var envelopeStr = Encoding.UTF8.GetString(stream.ToArray());
+        var lines = envelopeStr.Split('\n');
+        lines.Should().HaveCount(6);
+        lines[0].Should().StartWith("{\"sdk\"");
+        lines[1].Should().StartWith("{\"type\":\"transaction\",\"length\":");
+        lines[2].Should().StartWith("{\"type\":\"transaction\"");
+        lines[3].Should().StartWith("{\"type\":\"profile\",\"length\":");
+        lines[4].Should().Contain("\"profile\":{");
+        lines[5].Should().BeEmpty();
     }
 
     [Fact]
@@ -1041,7 +1392,7 @@ public partial class HubTests
         hub.CaptureEvent(evt);
 
         // Assert
-        _fixture.Client.Received(enabled ? 1 : 0).CaptureEvent(Arg.Any<SentryEvent>(), Arg.Any<Scope>());
+        _fixture.Client.Received(enabled ? 1 : 0).CaptureEvent(Arg.Any<SentryEvent>(), Arg.Any<Scope>(), Arg.Any<Hint>());
     }
 
     [Theory]
@@ -1098,19 +1449,28 @@ public partial class HubTests
         }
 
         // Act
-        var t = hub.StartTransaction("test", "test");
-        t.Finish();
+        var transaction = hub.StartTransaction("test", "test");
+        transaction.Finish();
 
         // Assert
-        _fixture.Client.Received(enabled ? 1 : 0).CaptureTransaction(Arg.Any<Transaction>());
+        _fixture.Client.Received().CaptureTransaction(Arg.Is<Transaction>(t => t.IsSampled == enabled), Arg.Any<Scope>(), Arg.Any<Hint>());
     }
 
-#if ANDROID && CI_BUILD
-    // TODO: Test is flaky in CI
-    [SkippableTheory(typeof(NSubstitute.Exceptions.ReceivedCallsException))]
-#else
+    [Fact]
+    public void CaptureTransaction_Client_Gets_Hint()
+    {
+        // Arrange
+        var hub = _fixture.GetSut();
+
+        // Act
+        var transaction = hub.StartTransaction("test", "test");
+        transaction.Finish();
+
+        // Assert
+        _fixture.Client.Received().CaptureTransaction(Arg.Any<Transaction>(), Arg.Any<Scope>(), Arg.Any<Hint>());
+    }
+
     [Theory]
-#endif
     [InlineData(false)]
     [InlineData(true)]
     public async Task FlushOnDispose_SendsEnvelope(bool cachingEnabled)
@@ -1147,4 +1507,13 @@ public partial class HubTests
         await transport.Received(1)
             .SendEnvelopeAsync(Arg.Any<Envelope>(), Arg.Any<CancellationToken>());
     }
+
+    private static Scope GetCurrentScope(Hub hub) => hub.ScopeManager.GetCurrent().Key;
 }
+
+#if NET6_0_OR_GREATER
+[JsonSerializable(typeof(HubTests.EvilContext))]
+internal partial class HubTestsJsonContext : JsonSerializerContext
+{
+}
+#endif

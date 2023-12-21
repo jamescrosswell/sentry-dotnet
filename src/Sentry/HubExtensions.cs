@@ -1,3 +1,4 @@
+using Sentry.Extensibility;
 using Sentry.Infrastructure;
 using Sentry.Internal;
 using Sentry.Internal.Extensions;
@@ -13,13 +14,13 @@ public static class HubExtensions
     /// <summary>
     /// Starts a transaction.
     /// </summary>
-    public static ITransaction StartTransaction(this IHub hub, ITransactionContext context) =>
+    public static ITransactionTracer StartTransaction(this IHub hub, ITransactionContext context) =>
         hub.StartTransaction(context, new Dictionary<string, object?>());
 
     /// <summary>
     /// Starts a transaction.
     /// </summary>
-    public static ITransaction StartTransaction(
+    public static ITransactionTracer StartTransaction(
         this IHub hub,
         string name,
         string operation) =>
@@ -28,7 +29,7 @@ public static class HubExtensions
     /// <summary>
     /// Starts a transaction.
     /// </summary>
-    public static ITransaction StartTransaction(
+    public static ITransactionTracer StartTransaction(
         this IHub hub,
         string name,
         string operation,
@@ -43,7 +44,7 @@ public static class HubExtensions
     /// <summary>
     /// Starts a transaction from the specified trace header.
     /// </summary>
-    public static ITransaction StartTransaction(
+    public static ITransactionTracer StartTransaction(
         this IHub hub,
         string name,
         string operation,
@@ -111,14 +112,41 @@ public static class HubExtensions
             return;
         }
 
+        var breadcrumb = new Breadcrumb(
+            (clock ?? SystemClock.Clock).GetUtcNow(),
+            message,
+            type,
+            data != null ? new Dictionary<string, string>(data) : null,
+            category,
+            level
+        );
+
+        hub.AddBreadcrumb(
+            breadcrumb
+            );
+    }
+
+    /// <summary>
+    /// Adds a breadcrumb to the current scope.
+    /// </summary>
+    /// <param name="hub">The Hub which holds the scope stack.</param>
+    /// <param name="breadcrumb">The breadcrumb to add</param>
+    /// <param name="hint">An hint provided with the breadcrumb in the BeforeBreadcrumb callback</param>
+    public static void AddBreadcrumb(
+        this IHub hub,
+        Breadcrumb breadcrumb,
+        Hint? hint = null
+        )
+    {
+        // Not to throw on code that ignores nullability warnings.
+        if (hub.IsNull())
+        {
+            return;
+        }
+
         hub.ConfigureScope(
-            s => s.AddBreadcrumb(
-                (clock ?? SystemClock.Clock).GetUtcNow(),
-                message,
-                category,
-                type,
-                data != null ? new Dictionary<string, string>(data) : null,
-                level));
+            s => s.AddBreadcrumb(breadcrumb, hint ?? new Hint())
+            );
     }
 
     /// <summary>
@@ -156,10 +184,7 @@ public static class HubExtensions
     }
 
     internal static SentryId CaptureExceptionInternal(this IHub hub, Exception ex) =>
-        hub.CaptureEventInternal(new SentryEvent(ex));
-
-    internal static SentryId CaptureEventInternal(this IHub hub, SentryEvent evt) =>
-        hub is IHubEx hubEx ? hubEx.CaptureEventInternal(evt) : hub.CaptureEvent(evt);
+        hub.CaptureEvent(new SentryEvent(ex));
 
     /// <summary>
     /// Captures the exception with a configurable scope callback.
@@ -196,23 +221,25 @@ public static class HubExtensions
         return hub.CaptureEvent(sentryEvent, configureScope);
     }
 
-    internal static ITransaction StartTransaction(
+    internal static ITransactionTracer StartTransaction(
         this IHub hub,
         ITransactionContext context,
         IReadOnlyDictionary<string, object?> customSamplingContext,
-        DynamicSamplingContext? dynamicSamplingContext)
-        => hub is Hub fullHub
-            ? fullHub.StartTransaction(context, customSamplingContext, dynamicSamplingContext)
-            : hub.StartTransaction(context, customSamplingContext);
+        DynamicSamplingContext? dynamicSamplingContext) => hub switch
+        {
+            Hub fullHub => fullHub.StartTransaction(context, customSamplingContext, dynamicSamplingContext),
+            HubAdapter adapter => adapter.StartTransaction(context, customSamplingContext, dynamicSamplingContext),
+            _ => hub.StartTransaction(context, customSamplingContext)
+        };
 
-    internal static ITransaction? GetTransaction(this IHub hub)
+    internal static ITransactionTracer? GetTransaction(this IHub hub)
     {
-        ITransaction? transaction = null;
+        ITransactionTracer? transaction = null;
         hub.ConfigureScope(scope => transaction = scope.Transaction);
         return transaction;
     }
 
-    internal static ITransaction? GetTransactionIfSampled(this IHub hub)
+    internal static ITransactionTracer? GetTransactionIfSampled(this IHub hub)
     {
         var transaction = hub.GetTransaction();
         return transaction?.IsSampled == true ? transaction : null;

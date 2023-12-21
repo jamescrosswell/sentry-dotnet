@@ -1,6 +1,8 @@
 using Sentry.Extensibility;
 using Sentry.Internal;
 using Sentry.Internal.Extensions;
+using Sentry.Internal.OpenTelemetry;
+using Sentry.Protocol;
 
 namespace Sentry;
 
@@ -11,7 +13,7 @@ namespace Sentry;
 /// Scope data is sent together with any event captured
 /// during the lifetime of the scope.
 /// </remarks>
-public class Scope : IEventLike, IHasDistribution
+public class Scope : IEventLike
 {
     internal SentryOptions Options { get; }
 
@@ -81,7 +83,7 @@ public class Scope : IEventLike, IHasDistribution
     /// but execution at a later time, when more data is available.
     /// </remarks>
     /// <see cref="Evaluate"/>
-    internal event EventHandler? OnEvaluating;
+    internal event EventHandler<Scope>? OnEvaluating;
 
     /// <inheritdoc />
     public SentryLevel? Level { get; set; }
@@ -119,20 +121,24 @@ public class Scope : IEventLike, IHasDistribution
     /// <inheritdoc />
     public User User
     {
-        get => _user ??= new User { PropertyChanged = UserChanged };
+        get => _user ??= new User
+        {
+            PropertyChanged = UserChanged
+        };
         set
         {
-            _user = value;
-            if (_user is not null)
+            if (_user != value)
             {
-                _user.PropertyChanged = UserChanged;
+                _user = value;
+                if (_user is not null)
+                {
+                    _user.PropertyChanged = UserChanged;
+                }
+
+                UserChanged.Invoke(_user);
             }
-            UserChanged.Invoke(_user);
         }
     }
-
-    /// <inheritdoc />
-    public string? Platform { get; set; }
 
     /// <inheritdoc />
     public string? Release { get; set; }
@@ -176,16 +182,18 @@ public class Scope : IEventLike, IHasDistribution
         }
     }
 
-    private ITransaction? _transaction;
+    private ITransactionTracer? _transaction;
 
     /// <summary>
     /// Transaction.
     /// </summary>
-    public ITransaction? Transaction
+    public ITransactionTracer? Transaction
     {
         get => _transaction;
         set => _transaction = value;
     }
+
+    internal SentryPropagationContext PropagationContext { get; set; }
 
     internal SessionUpdate? SessionUpdate { get; set; }
 
@@ -196,7 +204,7 @@ public class Scope : IEventLike, IHasDistribution
     public IReadOnlyList<string> Fingerprint { get; set; } = Array.Empty<string>();
 
 #if NETSTANDARD2_0 || NETFRAMEWORK
-    private ConcurrentQueue<Breadcrumb> _breadcrumbs = new(); 
+    private ConcurrentQueue<Breadcrumb> _breadcrumbs = new();
 #else
     private readonly ConcurrentQueue<Breadcrumb> _breadcrumbs = new();
 #endif
@@ -215,10 +223,9 @@ public class Scope : IEventLike, IHasDistribution
     public IReadOnlyDictionary<string, string> Tags => _tags;
 
 #if NETSTANDARD2_0 || NETFRAMEWORK
-        private ConcurrentBag<Attachment> _attachments = new();
+    private ConcurrentBag<Attachment> _attachments = new();
 #else
     private readonly ConcurrentBag<Attachment> _attachments = new();
-
 #endif
 
     /// <summary>
@@ -230,8 +237,14 @@ public class Scope : IEventLike, IHasDistribution
     /// Creates a scope with the specified options.
     /// </summary>
     public Scope(SentryOptions? options)
+        : this(options, null)
+    {
+    }
+
+    internal Scope(SentryOptions? options, SentryPropagationContext? propagationContext)
     {
         Options = options ?? new SentryOptions();
+        PropagationContext = new SentryPropagationContext(propagationContext);
     }
 
     // For testing. Should explicitly require SentryOptions.
@@ -241,11 +254,20 @@ public class Scope : IEventLike, IHasDistribution
     }
 
     /// <inheritdoc />
-    public void AddBreadcrumb(Breadcrumb breadcrumb)
+    public void AddBreadcrumb(Breadcrumb breadcrumb) => AddBreadcrumb(breadcrumb, new Hint());
+
+    /// <summary>
+    /// Adds a breadcrumb with a hint.
+    /// </summary>
+    /// <param name="breadcrumb">The breadcrumb</param>
+    /// <param name="hint">A hint for use in the BeforeBreadcrumb callback</param>
+    public void AddBreadcrumb(Breadcrumb breadcrumb, Hint hint)
     {
-        if (Options.BeforeBreadcrumb is { } beforeBreadcrumb)
+        if (Options.BeforeBreadcrumbInternal is { } beforeBreadcrumb)
         {
-            if (beforeBreadcrumb(breadcrumb) is { } processedBreadcrumb)
+            hint.AddAttachmentsFromScope(this);
+
+            if (beforeBreadcrumb(breadcrumb, hint) is { } processedBreadcrumb)
             {
                 breadcrumb = processedBreadcrumb;
             }
@@ -287,6 +309,11 @@ public class Scope : IEventLike, IHasDistribution
     /// <inheritdoc />
     public void SetTag(string key, string value)
     {
+        if (Options.TagFilters.Any(x => x.IsMatch(key)))
+        {
+            return;
+        }
+
         _tags[key] = value;
         if (Options.EnableScopeSync)
         {
@@ -310,7 +337,7 @@ public class Scope : IEventLike, IHasDistribution
     public void AddAttachment(Attachment attachment) => _attachments.Add(attachment);
 
     /// <summary>
-    /// Resets all the properties and collections within the scope to their default values. 
+    /// Resets all the properties and collections within the scope to their default values.
     /// </summary>
     public void Clear()
     {
@@ -318,7 +345,6 @@ public class Scope : IEventLike, IHasDistribution
         Request = new();
         Contexts.Clear();
         User = new();
-        Platform = default;
         Release = default;
         Distribution = default;
         Environment = default;
@@ -329,6 +355,7 @@ public class Scope : IEventLike, IHasDistribution
         _extra.Clear();
         _tags.Clear();
         ClearAttachments();
+        PropagationContext = new();
     }
 
     /// <summary>
@@ -337,7 +364,7 @@ public class Scope : IEventLike, IHasDistribution
     public void ClearAttachments()
     {
 #if NETSTANDARD2_0 || NETFRAMEWORK
-            Interlocked.Exchange(ref _attachments, new());
+        Interlocked.Exchange(ref _attachments, new());
 #else
         _attachments.Clear();
 #endif
@@ -353,9 +380,8 @@ public class Scope : IEventLike, IHasDistribution
         Interlocked.Exchange(ref _breadcrumbs, new());
 #else
         _breadcrumbs.Clear();
-#endif        
+#endif
     }
-
 
     /// <summary>
     /// Applies the data from this scope to another event-like object.
@@ -408,9 +434,8 @@ public class Scope : IEventLike, IHasDistribution
         Request.CopyTo(other.Request);
         User.CopyTo(other.User);
 
-        other.Platform ??= Platform;
         other.Release ??= Release;
-        other.WithDistribution(_ => _.Distribution ??= Distribution);
+        other.Distribution ??= Distribution;
         other.Environment ??= Environment;
         other.TransactionName ??= TransactionName;
         other.Level ??= Level;
@@ -460,7 +485,11 @@ public class Scope : IEventLike, IHasDistribution
     /// </summary>
     public Scope Clone()
     {
-        var clone = new Scope(Options);
+        var clone = new Scope(Options, PropagationContext)
+        {
+            OnEvaluating = OnEvaluating
+        };
+
         Apply(clone);
 
         foreach (var processor in EventProcessors)
@@ -497,13 +526,11 @@ public class Scope : IEventLike, IHasDistribution
 
             try
             {
-                OnEvaluating?.Invoke(this, EventArgs.Empty);
+                OnEvaluating?.Invoke(this, this);
             }
             catch (Exception ex)
             {
-                Options.DiagnosticLogger?.LogError(
-                    "Failed invoking event handler.",
-                    ex);
+                Options.DiagnosticLogger?.LogError(ex, "Failed invoking event handler.");
             }
             finally
             {
@@ -512,12 +539,30 @@ public class Scope : IEventLike, IHasDistribution
         }
     }
 
-    /// <summary>
-    /// Gets the currently ongoing (not finished) span or <c>null</c> if none available.
-    /// This relies on the transactions being manually set on the scope via <see cref="Transaction"/>.
-    /// </summary>
-    public ISpan? GetSpan() => Transaction?.GetLastActiveSpan() ?? Transaction;
+    private ISpan? _span;
 
-    internal void ResetTransaction(ITransaction? expectedCurrentTransaction) =>
+    /// <summary>
+    /// Gets or sets the active span, or <c>null</c> if none available.
+    /// </summary>
+    /// <remarks>
+    /// If a span has been set on this property, it will become the active span until it is finished.
+    /// Otherwise, the active span is the latest unfinished span on the transaction, presuming a transaction
+    /// was set on the scope via the <see cref="Transaction"/> property.
+    /// </remarks>
+    public ISpan? Span
+    {
+        get
+        {
+            if (_span?.IsFinished is false)
+            {
+                return _span;
+            }
+
+            return Transaction?.GetLastActiveSpan() ?? Transaction;
+        }
+        set => _span = value;
+    }
+
+    internal void ResetTransaction(ITransactionTracer? expectedCurrentTransaction) =>
         Interlocked.CompareExchange(ref _transaction, null, expectedCurrentTransaction);
 }

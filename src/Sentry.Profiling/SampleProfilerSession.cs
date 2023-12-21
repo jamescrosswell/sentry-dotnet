@@ -1,56 +1,85 @@
 using System.Diagnostics.Tracing;
 using Microsoft.Diagnostics.NETCore.Client;
+using Microsoft.Diagnostics.Tracing.Etlx;
+using Microsoft.Diagnostics.Tracing.EventPipe;
 using Microsoft.Diagnostics.Tracing.Parsers;
+using Sentry.Extensibility;
+using Sentry.Internal;
 
 namespace Sentry.Profiling;
 
-internal class SampleProfilerSession
+internal class SampleProfilerSession : IDisposable
 {
     private readonly EventPipeSession _session;
-    private readonly MemoryStream _stream;
-    private readonly Task _copyTask;
+    private readonly TraceLogEventSource _eventSource;
+    private readonly SampleProfilerTraceEventParser _sampleEventParser;
+    private readonly IDiagnosticLogger? _logger;
+    private readonly SentryStopwatch _stopwatch;
+    private bool _stopped = false;
 
-    private readonly CancellationTokenRegistration _stopRegistration;
-
-    private SampleProfilerSession(EventPipeSession session, MemoryStream stream, Task copyTask, CancellationTokenRegistration stopRegistration)
+    private SampleProfilerSession(SentryStopwatch stopwatch, EventPipeSession session, TraceLogEventSource eventSource, IDiagnosticLogger? logger)
     {
         _session = session;
-        _stream = stream;
-        _copyTask = copyTask;
-        _stopRegistration = stopRegistration;
+        _logger = logger;
+        _eventSource = eventSource;
+        _sampleEventParser = new SampleProfilerTraceEventParser(_eventSource);
+        _stopwatch = stopwatch;
     }
 
-    public static SampleProfilerSession StartNew(CancellationToken cancellationToken)
+    // Exposed only for benchmarks.
+    internal static EventPipeProvider[] Providers = new[]
     {
-        var providers = new[]
-        {
-            // Note: all events we need issued by "DotNETRuntime" provider are at "EventLevel.Informational"
-            // see https://learn.microsoft.com/en-us/dotnet/fundamentals/diagnostics/runtime-events
-            new EventPipeProvider("Microsoft-Windows-DotNETRuntime", EventLevel.Informational, (long)ClrTraceEventParser.Keywords.Default),
-            new EventPipeProvider("Microsoft-DotNETCore-SampleProfiler", EventLevel.Informational),
-            new EventPipeProvider("System.Threading.Tasks.TplEventSource", EventLevel.Informational, (long)TplEtwProviderTraceEventParser.Keywords.Default)
-        };
+        // Note: all events we need issued by "DotNETRuntime" provider are at "EventLevel.Informational"
+        // see https://learn.microsoft.com/en-us/dotnet/fundamentals/diagnostics/runtime-events
+        // TODO replace Keywords.Default with a subset. Currently it is:
+        //   Default = GC | Type | GCHeapSurvivalAndMovement | Binder | Loader | Jit | NGen | SupressNGen
+        //                | StopEnumeration | Security | AppDomainResourceManagement | Exception | Threading | Contention | Stack | JittedMethodILToNativeMap
+        //                | ThreadTransfer | GCHeapAndTypeNames | Codesymbols | Compilation,
+        new EventPipeProvider(ClrTraceEventParser.ProviderName, EventLevel.Informational, (long) ClrTraceEventParser.Keywords.Default),
+        new EventPipeProvider(SampleProfilerTraceEventParser.ProviderName, EventLevel.Informational),
+        // new EventPipeProvider(TplEtwProviderTraceEventParser.ProviderName, EventLevel.Informational, (long) TplEtwProviderTraceEventParser.Keywords.Default)
+    };
 
+    // Exposed only for benchmarks.
+    // The size of the runtime's buffer for collecting events in MB, same as the current default in StartEventPipeSession().
+    internal static int CircularBufferMB = 256;
 
-        // The size of the runtime's buffer for collecting events in MB, same as the current default in StartEventPipeSession().
-        var circularBufferMB = 256;
+    public SampleProfilerTraceEventParser SampleEventParser => _sampleEventParser;
 
+    public TimeSpan Elapsed => _stopwatch.Elapsed;
+
+    public TraceLog TraceLog => _eventSource.TraceLog;
+
+    public static SampleProfilerSession StartNew(IDiagnosticLogger? logger = null)
+    {
         var client = new DiagnosticsClient(Process.GetCurrentProcess().Id);
-        var session = client.StartEventPipeSession(providers, true, circularBufferMB);
-        var stopRegistration = cancellationToken.Register(() => session.Stop(), false);
-        var stream = new MemoryStream();
-        var copyTask = session.EventStream.CopyToAsync(stream, cancellationToken);
+        var session = client.StartEventPipeSession(Providers, requestRundown: false, CircularBufferMB);
+        var stopWatch = SentryStopwatch.StartNew();
+        var eventSource = TraceLog.CreateFromEventPipeSession(session, TraceLog.EventPipeRundownConfiguration.Enable(client));
 
-        return new SampleProfilerSession(session, stream, copyTask, stopRegistration);
+        // Process() blocks until the session is stopped so we need to run it on a separate thread.
+        Task.Factory.StartNew(eventSource.Process, TaskCreationOptions.LongRunning);
+
+        return new SampleProfilerSession(stopWatch, session, eventSource, logger);
     }
 
-    public async Task<MemoryStream> FinishAsync()
+    public void Stop()
     {
-        _stopRegistration.Unregister();
-        await _session.StopAsync(CancellationToken.None).ConfigureAwait(false);
-        await _copyTask.ConfigureAwait(false);
-        _session.Dispose();
-        _stream.Position = 0;
-        return _stream;
+        if (!_stopped)
+        {
+            try
+            {
+                _stopped = true;
+                _session.Stop();
+                _session.Dispose();
+                _eventSource.Dispose();
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Error during sampler profiler session shutdown.", ex);
+            }
+        }
     }
+
+    public void Dispose() => Stop();
 }

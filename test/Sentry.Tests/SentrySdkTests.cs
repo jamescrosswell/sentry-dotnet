@@ -80,22 +80,6 @@ public class SentrySdkTests : IDisposable
     }
 
     [Fact]
-    public void Init_ValidDsnWithSecret_EnablesSdk()
-    {
-        using var _ = SentrySdk.Init(o =>
-        {
-#pragma warning disable CS0618
-            o.Dsn = ValidDsnWithSecret;
-#pragma warning restore CS0618
-            o.AutoSessionTracking = false;
-            o.BackgroundWorker = Substitute.For<IBackgroundWorker>();
-            o.InitNativeSdks = false;
-        });
-
-        Assert.True(SentrySdk.IsEnabled);
-    }
-
-    [Fact]
     public void Init_ValidDsnEnvironmentVariable_EnablesSdk()
     {
         using var _ = SentrySdk.Init(o =>
@@ -114,10 +98,7 @@ public class SentrySdkTests : IDisposable
     {
         // If the variable was set, to non empty string but value is broken, better crash than silently disable
         var ex = Assert.Throws<ArgumentException>(() =>
-            SentrySdk.Init(o =>
-            {
-                o.FakeSettings().EnvironmentVariables[DsnEnvironmentVariable] = InvalidDsn;
-            }));
+            SentrySdk.Init(o => o.FakeSettings().EnvironmentVariables[DsnEnvironmentVariable] = InvalidDsn));
 
         Assert.Equal("Invalid DSN: A Project Id is required.", ex.Message);
     }
@@ -125,10 +106,7 @@ public class SentrySdkTests : IDisposable
     [Fact]
     public void Init_DisableDsnEnvironmentVariable_DisablesSdk()
     {
-        using var _ = SentrySdk.Init(o =>
-        {
-            o.FakeSettings().EnvironmentVariables[DsnEnvironmentVariable] = Constants.DisableSdkDsnValue;
-        });
+        using var _ = SentrySdk.Init(o => o.FakeSettings().EnvironmentVariables[DsnEnvironmentVariable] = Constants.DisableSdkDsnValue);
 
         Assert.False(SentrySdk.IsEnabled);
     }
@@ -147,6 +125,7 @@ public class SentrySdkTests : IDisposable
     {
         var options = new SentryOptions
         {
+            Dsn = Constants.DisableSdkDsnValue,
             DiagnosticLogger = _logger,
             Debug = true,
             InitNativeSdks = false
@@ -154,7 +133,7 @@ public class SentrySdkTests : IDisposable
 
         using (SentrySdk.Init(options))
         {
-            _logger.Received(1).Log(SentryLevel.Warning, "Init was called but no DSN was provided nor located. Sentry SDK will be disabled.");
+            _logger.Received(1).Log(SentryLevel.Warning, "Init called with an empty string as the DSN. Sentry SDK will be disabled.");
         }
     }
 
@@ -182,6 +161,7 @@ public class SentrySdkTests : IDisposable
     {
         var options = new SentryOptions
         {
+            Dsn = Constants.DisableSdkDsnValue,
             DiagnosticLogger = _logger,
             Debug = false,
             InitNativeSdks = false,
@@ -434,7 +414,7 @@ public class SentrySdkTests : IDisposable
     public void PushScope_MultiCallParameterless_SameDisposableInstance() => Assert.Same(SentrySdk.PushScope(), SentrySdk.PushScope());
 
     [Fact]
-    public void AddBreadcrumb_NoClock_NoOp() => SentrySdk.AddBreadcrumb(null!);
+    public void AddBreadcrumb_NoClock_NoOp() => SentrySdk.AddBreadcrumb(message: null!);
 
     [Fact]
     public void AddBreadcrumb_WithClock_NoOp() => SentrySdk.AddBreadcrumb(clock: null, null!);
@@ -471,43 +451,6 @@ public class SentrySdkTests : IDisposable
             await Task.Yield();
             SentrySdk.AddBreadcrumb(expected);
         }
-    }
-
-    [Fact]
-    public void WithScope_DisabledSdk_CallbackNeverInvoked()
-    {
-        var invoked = false;
-#pragma warning disable CS0618
-        SentrySdk.WithScope(_ => invoked = true);
-#pragma warning restore CS0618
-        Assert.False(invoked);
-    }
-
-    [Fact]
-    public void WithScope_InvokedWithNewScope()
-    {
-        var options = new SentryOptions
-        {
-            Dsn = ValidDsn,
-            IsGlobalModeEnabled = false,
-            AutoSessionTracking = false,
-            BackgroundWorker = Substitute.For<IBackgroundWorker>(),
-            InitNativeSdks = false
-        };
-
-        using var _ = SentrySdk.Init(options);
-
-        Scope expected = null;
-        SentrySdk.ConfigureScope(s => expected = s);
-
-        Scope actual = null;
-#pragma warning disable CS0618
-        SentrySdk.WithScope(s => actual = s);
-#pragma warning restore CS0618
-
-        Assert.NotNull(actual);
-        Assert.NotSame(expected, actual);
-        SentrySdk.ConfigureScope(s => Assert.Same(expected, s));
     }
 
     [Fact]
@@ -725,14 +668,14 @@ public class SentrySdkTests : IDisposable
     [Fact]
     public void InitHub_NoDsn_DisposeDoesNotThrow()
     {
-        var sut = SentrySdk.InitHub(new SentryOptions()) as IDisposable;
+        var sut = SentrySdk.InitHub(new SentryOptions(){Dsn = Constants.DisableSdkDsnValue}) as IDisposable;
         sut?.Dispose();
     }
 
     [Fact]
     public async Task InitHub_NoDsn_FlushAsyncDoesNotThrow()
     {
-        var sut = SentrySdk.InitHub(new SentryOptions());
+        var sut = SentrySdk.InitHub(new SentryOptions(){Dsn = Constants.DisableSdkDsnValue});
         await sut.FlushAsync();
     }
 

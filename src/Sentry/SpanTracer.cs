@@ -1,4 +1,5 @@
 using Sentry.Internal;
+using Sentry.Protocol;
 
 namespace Sentry;
 
@@ -13,22 +14,32 @@ public class SpanTracer : ISpan
     internal TransactionTracer Transaction { get; }
 
     /// <inheritdoc />
-    public SpanId SpanId { get; }
+    public SpanId SpanId { get; internal set; }
 
     /// <inheritdoc />
-    public SpanId? ParentSpanId { get; internal set; }
+    public SpanId? ParentSpanId { get; }
 
     /// <inheritdoc />
     public SentryId TraceId { get; }
 
     /// <inheritdoc />
-    public DateTimeOffset StartTimestamp => _stopwatch.StartDateTimeOffset;
+    public DateTimeOffset StartTimestamp { get; internal set; }
 
     /// <inheritdoc />
-    public DateTimeOffset? EndTimestamp { get; private set; }
+    public DateTimeOffset? EndTimestamp { get; internal set; }
 
     /// <inheritdoc />
     public bool IsFinished => EndTimestamp is not null;
+
+    // Not readonly because of deserialization
+    internal Dictionary<string, Measurement>? InternalMeasurements { get; private set; }
+
+    /// <inheritdoc />
+    public IReadOnlyDictionary<string, Measurement> Measurements => InternalMeasurements ??= new Dictionary<string, Measurement>();
+
+    /// <inheritdoc />
+    public void SetMeasurement(string name, Measurement measurement) =>
+        (InternalMeasurements ??= new Dictionary<string, Measurement>())[name] = measurement;
 
     /// <inheritdoc cref="ISpan.Operation" />
     public string Operation { get; set; }
@@ -39,21 +50,29 @@ public class SpanTracer : ISpan
     /// <inheritdoc cref="ISpan.Status" />
     public SpanStatus? Status { get; set; }
 
+    /// <summary>
+    /// Used by the Sentry.OpenTelemetry.SentrySpanProcessor to mark a span as a Sentry request. Ideally we wouldn't
+    /// create these spans but since we can't avoid doing that, once we detect that it's a Sentry request we mark it
+    /// as such so that we can filter it when the transaction finishes and the TransactionTracer gets converted into
+    /// a Transaction.
+    /// </summary>
+    internal bool IsSentryRequest { get; set; }
+
     /// <inheritdoc />
     public bool? IsSampled { get; internal set; }
 
-    private ConcurrentDictionary<string, string>? _tags;
+    internal ConcurrentDictionary<string, string>? InternalTags { get; private set; }
 
     /// <inheritdoc />
-    public IReadOnlyDictionary<string, string> Tags => _tags ??= new ConcurrentDictionary<string, string>();
+    public IReadOnlyDictionary<string, string> Tags => InternalTags ??= new ConcurrentDictionary<string, string>();
 
     /// <inheritdoc />
     public void SetTag(string key, string value) =>
-        (_tags ??= new ConcurrentDictionary<string, string>())[key] = value;
+        (InternalTags ??= new ConcurrentDictionary<string, string>())[key] = value;
 
     /// <inheritdoc />
     public void UnsetTag(string key) =>
-        (_tags ??= new ConcurrentDictionary<string, string>()).TryRemove(key, out _);
+        (InternalTags ??= new ConcurrentDictionary<string, string>()).TryRemove(key, out _);
 
     private readonly ConcurrentDictionary<string, object?> _data = new();
 
@@ -79,16 +98,44 @@ public class SpanTracer : ISpan
         ParentSpanId = parentSpanId;
         TraceId = traceId;
         Operation = operation;
+        StartTimestamp = _stopwatch.StartDateTimeOffset;
+    }
+
+    internal SpanTracer(
+        IHub hub,
+        TransactionTracer transaction,
+        SpanId spanId,
+        SpanId? parentSpanId,
+        SentryId traceId,
+        string operation)
+    {
+        _hub = hub;
+        Transaction = transaction;
+        SpanId = spanId;
+        ParentSpanId = parentSpanId;
+        TraceId = traceId;
+        Operation = operation;
+        StartTimestamp = _stopwatch.StartDateTimeOffset;
     }
 
     /// <inheritdoc />
-    public ISpan StartChild(string operation) => Transaction.StartChild(SpanId, operation);
+    public ISpan StartChild(string operation) => Transaction.StartChild(null, parentSpanId:SpanId, operation: operation);
+
+    /// <summary>
+    /// Used to mark a span as unfinished when it was previously marked as finished. This allows us to reuse spans for
+    /// DB Connections that get reused by the underlying connection pool
+    /// </summary>
+    internal void Unfinish()
+    {
+        Status = null;
+        EndTimestamp = null;
+    }
 
     /// <inheritdoc />
     public void Finish()
     {
         Status ??= SpanStatus.Ok;
-        EndTimestamp = _stopwatch.CurrentDateTimeOffset;
+        EndTimestamp ??= _stopwatch.CurrentDateTimeOffset;
     }
 
     /// <inheritdoc />

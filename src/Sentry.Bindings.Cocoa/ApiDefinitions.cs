@@ -20,7 +20,7 @@ partial interface Constants
 
     // extern const unsigned char[] SentryVersionString;
     [Field ("SentryVersionString", "__Internal")]
-    [return: PlainString]
+    [PlainString]
     NSString SentryVersionString { get; }
 }
 
@@ -151,7 +151,7 @@ interface SentryBreadcrumb : SentrySerializable
 
     // -(NSDictionary<NSString *,id> * _Nonnull)serialize;
     [Export ("serialize")]
-    NSDictionary<NSString, NSObject> Serialize();
+    new NSDictionary<NSString, NSObject> Serialize();
 
     // -(BOOL)isEqualToBreadcrumb:(SentryBreadcrumb * _Nonnull)breadcrumb;
     [Export ("isEqualToBreadcrumb:")]
@@ -237,17 +237,29 @@ interface SentryCrashExceptionApplication
 [Internal]
 interface SentryDebugImageProvider
 {
-    // -(NSArray<SentryDebugMeta *> * _Nonnull)getDebugImagesForThreads:(NSArray<SentryThread *> * _Nonnull)threads;
+    // -(NSArray<SentryDebugMeta *> * _Nonnull)getDebugImagesForThreads:(NSArray<SentryThread *> * _Nonnull)threads __attribute__((deprecated("Use -[getDebugImagesForThreads:isCrash:] instead.")));
     [Export ("getDebugImagesForThreads:")]
     SentryDebugMeta[] GetDebugImagesForThreads (SentryThread[] threads);
 
-    // -(NSArray<SentryDebugMeta *> * _Nonnull)getDebugImagesForFrames:(NSArray<SentryFrame *> * _Nonnull)frames;
+    // -(NSArray<SentryDebugMeta *> * _Nonnull)getDebugImagesForThreads:(NSArray<SentryThread *> * _Nonnull)threads isCrash:(BOOL)isCrash;
+    [Export ("getDebugImagesForThreads:isCrash:")]
+    SentryDebugMeta[] GetDebugImagesForThreads (SentryThread[] threads, bool isCrash);
+
+    // -(NSArray<SentryDebugMeta *> * _Nonnull)getDebugImagesForFrames:(NSArray<SentryFrame *> * _Nonnull)frames __attribute__((deprecated("Use -[getDebugImagesForFrames:isCrash:] instead.")));
     [Export ("getDebugImagesForFrames:")]
     SentryDebugMeta[] GetDebugImagesForFrames (SentryFrame[] frames);
 
-    // -(NSArray<SentryDebugMeta *> * _Nonnull)getDebugImages;
+    // -(NSArray<SentryDebugMeta *> * _Nonnull)getDebugImagesForFrames:(NSArray<SentryFrame *> * _Nonnull)frames isCrash:(BOOL)isCrash;
+    [Export ("getDebugImagesForFrames:isCrash:")]
+    SentryDebugMeta[] GetDebugImagesForFrames (SentryFrame[] frames, bool isCrash);
+
+    // -(NSArray<SentryDebugMeta *> * _Nonnull)getDebugImages __attribute__((deprecated("Use -[getDebugImagesCrashed:] instead.")));
     [Export ("getDebugImages")]
     SentryDebugMeta[] DebugImages { get; }
+
+    // -(NSArray<SentryDebugMeta *> * _Nonnull)getDebugImagesCrashed:(BOOL)isCrash;
+    [Export ("getDebugImagesCrashed:")]
+    SentryDebugMeta[] GetDebugImagesCrashed (bool isCrash);
 }
 
 // @interface SentryDebugMeta : NSObject <SentrySerializable>
@@ -548,6 +560,10 @@ interface SentryFrame : SentrySerializable
     [NullAllowed, Export ("instructionAddress")]
     string InstructionAddress { get; set; }
 
+    // @property (nonatomic) NSUInteger instruction;
+    [Export ("instruction")]
+    nuint Instruction { get; set; }
+
     // @property (copy, nonatomic) NSNumber * _Nullable lineNumber;
     [NullAllowed, Export ("lineNumber", ArgumentSemantic.Copy)]
     NSNumber LineNumber { get; set; }
@@ -712,10 +728,6 @@ interface SentryOptions
     [Export ("attachStacktrace")]
     bool AttachStacktrace { get; set; }
 
-    // @property (assign, nonatomic) BOOL stitchAsyncCode;
-    [Export ("stitchAsyncCode")]
-    bool StitchAsyncCode { get; set; }
-
     // @property (assign, nonatomic) NSUInteger maxAttachmentSize;
     [Export ("maxAttachmentSize")]
     nuint MaxAttachmentSize { get; set; }
@@ -727,6 +739,10 @@ interface SentryOptions
     // @property (assign, nonatomic) BOOL enableAutoPerformanceTracing;
     [Export ("enableAutoPerformanceTracing")]
     bool EnableAutoPerformanceTracing { get; set; }
+
+    // @property (nonatomic) SentryScope * _Nonnull (^ _Nonnull)(SentryScope * _Nonnull) initialScope;
+    [Export ("initialScope", ArgumentSemantic.Assign)]
+    Func<SentryScope, SentryScope> InitialScope { get; set; }
 
     // @property (assign, nonatomic) BOOL enableUIViewControllerTracing;
     [Export ("enableUIViewControllerTracing")]
@@ -859,9 +875,17 @@ interface SentryOptions
     [Export ("enableMetricKit")]
     bool EnableMetricKit { get; set; }
 
-    // @property (nonatomic) BOOL enableTimeToFullDisplay;
-    [Export ("enableTimeToFullDisplay")]
-    bool EnableTimeToFullDisplay { get; set; }
+    // @property (nonatomic) BOOL enableTimeToFullDisplayTracing;
+    [Export ("enableTimeToFullDisplayTracing")]
+    bool EnableTimeToFullDisplayTracing { get; set; }
+
+    // @property (assign, nonatomic) BOOL swiftAsyncStacktraces;
+    [Export ("swiftAsyncStacktraces")]
+    bool SwiftAsyncStacktraces { get; set; }
+
+    // @property (copy, nonatomic) NSString * _Nonnull cacheDirectoryPath;
+    [Export ("cacheDirectoryPath")]
+    string CacheDirectoryPath { get; set; }
 }
 
 // @protocol SentryIntegrationProtocol <NSObject>
@@ -909,6 +933,10 @@ interface SentrySpanContext : SentrySerializable
     // @property (readonly, copy, nonatomic) NSString * _Nullable spanDescription;
     [NullAllowed, Export ("spanDescription")]
     string SpanDescription { get; }
+
+    // @property (copy, nonatomic) NSString * _Nonnull origin;
+    [Export ("origin")]
+    string Origin { get; set; }
 
     // -(instancetype _Nonnull)initWithOperation:(NSString * _Nonnull)operation;
     [Export ("initWithOperation:")]
@@ -958,6 +986,11 @@ interface SentrySpan : SentrySerializable
     [Abstract]
     [Export ("operation")]
     string Operation { get; set; }
+
+    // @required @property (copy, nonatomic) NSString * _Nonnull origin;
+    [Abstract]
+    [Export ("origin")]
+    string Origin { get; set; }
 
     // @required @property (copy, nonatomic) NSString * _Nullable spanDescription;
     [Abstract]
@@ -1769,7 +1802,7 @@ partial interface SentryScope : SentrySerializable
 
     // -(NSDictionary<NSString *,id> * _Nonnull)serialize;
     [Export ("serialize")]
-    NSDictionary<NSString, NSObject> Serialize();
+    new NSDictionary<NSString, NSObject> Serialize();
 
     // -(void)setContextValue:(NSDictionary<NSString *,id> * _Nonnull)value forKey:(NSString * _Nonnull)key __attribute__((swift_name("setContext(value:key:)")));
     [Export ("setContextValue:forKey:")]
@@ -2124,13 +2157,17 @@ interface SentryTraceContext : SentrySerializable
     [NullAllowed, Export ("userSegment")]
     string UserSegment { get; }
 
-    // @property (nonatomic) NSString * _Nullable sampleRate;
+    // @property (readonly, nonatomic) NSString * _Nullable sampleRate;
     [NullAllowed, Export ("sampleRate")]
-    string SampleRate { get; set; }
+    string SampleRate { get; }
 
-    // -(instancetype _Nonnull)initWithTraceId:(SentryId * _Nonnull)traceId publicKey:(NSString * _Nonnull)publicKey releaseName:(NSString * _Nullable)releaseName environment:(NSString * _Nullable)environment transaction:(NSString * _Nullable)transaction userSegment:(NSString * _Nullable)userSegment sampleRate:(NSString * _Nullable)sampleRate;
-    [Export ("initWithTraceId:publicKey:releaseName:environment:transaction:userSegment:sampleRate:")]
-    NativeHandle Constructor (SentryId traceId, string publicKey, [NullAllowed] string releaseName, [NullAllowed] string environment, [NullAllowed] string transaction, [NullAllowed] string userSegment, [NullAllowed] string sampleRate);
+    // @property (readonly, nonatomic) NSString * _Nullable sampled;
+    [NullAllowed, Export ("sampled")]
+    string Sampled { get; }
+
+    // -(instancetype _Nonnull)initWithTraceId:(SentryId * _Nonnull)traceId publicKey:(NSString * _Nonnull)publicKey releaseName:(NSString * _Nullable)releaseName environment:(NSString * _Nullable)environment transaction:(NSString * _Nullable)transaction userSegment:(NSString * _Nullable)userSegment sampleRate:(NSString * _Nullable)sampleRate sampled:(NSString * _Nullable)sampled;
+    [Export ("initWithTraceId:publicKey:releaseName:environment:transaction:userSegment:sampleRate:sampled:")]
+    NativeHandle Constructor (SentryId traceId, string publicKey, [NullAllowed] string releaseName, [NullAllowed] string environment, [NullAllowed] string transaction, [NullAllowed] string userSegment, [NullAllowed] string sampleRate, [NullAllowed] string sampled);
 
     // -(instancetype _Nullable)initWithScope:(SentryScope * _Nonnull)scope options:(SentryOptions * _Nonnull)options;
     [Export ("initWithScope:options:")]
@@ -2143,6 +2180,10 @@ interface SentryTraceContext : SentrySerializable
     // -(instancetype _Nullable)initWithTracer:(SentryTracer * _Nonnull)tracer scope:(SentryScope * _Nullable)scope options:(SentryOptions * _Nonnull)options;
     [Export ("initWithTracer:scope:options:")]
     NativeHandle Constructor (SentryTracer tracer, [NullAllowed] SentryScope scope, SentryOptions options);
+
+    // -(instancetype _Nonnull)initWithTraceId:(SentryId * _Nonnull)traceId options:(SentryOptions * _Nonnull)options userSegment:(NSString * _Nullable)userSegment;
+    [Export ("initWithTraceId:options:userSegment:")]
+    NativeHandle Constructor (SentryId traceId, SentryOptions options, [NullAllowed] string userSegment);
 
     // -(SentryBaggage * _Nonnull)toBaggage;
     [Export ("toBaggage")]
@@ -2179,6 +2220,10 @@ interface SentryEnvelopeHeader
     // @property (readonly, copy, nonatomic) SentryTraceContext * _Nullable traceContext;
     [NullAllowed, Export ("traceContext", ArgumentSemantic.Copy)]
     SentryTraceContext TraceContext { get; }
+
+    // @property (copy, nonatomic) NSDate * _Nullable sentAt;
+    [NullAllowed, Export ("sentAt", ArgumentSemantic.Copy)]
+    NSDate SentAt { get; set; }
 }
 
 // @interface SentryEnvelopeItem : NSObject
@@ -2265,7 +2310,7 @@ interface SentryEnvelope
     SentryEnvelopeItem[] Items { get; }
 }
 
-// @interface SentryScreenFrames : NSObject
+// @interface SentryScreenFrames : NSObject <NSCopying>
 [BaseType (typeof(NSObject))]
 [DisableDefaultCtor]
 [Internal]
@@ -2334,6 +2379,11 @@ interface PrivateSentrySDKOnly
     [Export ("getDebugImages")]
     SentryDebugMeta[] DebugImages { get; }
 
+    // +(NSArray<SentryDebugMeta *> * _Nonnull)getDebugImagesCrashed:(BOOL)isCrash;
+    [Static]
+    [Export ("getDebugImagesCrashed:")]
+    SentryDebugMeta[] GetDebugImagesCrashed (bool isCrash);
+
     // +(void)setSdkName:(NSString * _Nonnull)sdkName andVersionString:(NSString * _Nonnull)versionString;
     [Static]
     [Export ("setSdkName:andVersionString:")]
@@ -2353,6 +2403,27 @@ interface PrivateSentrySDKOnly
     [Static]
     [Export ("getSdkVersionString")]
     string SdkVersionString { get; }
+
+    // +(NSDictionary * _Nonnull)getExtraContext;
+    [Static]
+    [Export ("getExtraContext")]
+    NSDictionary ExtraContext { get; }
+
+    // +(uint64_t)startProfilerForTrace:(SentryId * _Nonnull)traceId;
+    [Static]
+    [Export ("startProfilerForTrace:")]
+    ulong StartProfilerForTrace (SentryId traceId);
+
+    // +(NSDictionary<NSString *,id> * _Nullable)collectProfileBetween:(uint64_t)startSystemTime and:(uint64_t)endSystemTime forTrace:(SentryId * _Nonnull)traceId;
+    [Static]
+    [Export ("collectProfileBetween:and:forTrace:")]
+    [return: NullAllowed]
+    NSDictionary<NSString, NSObject> CollectProfileBetween (ulong startSystemTime, ulong endSystemTime, SentryId traceId);
+
+    // +(void)discardProfilerForTrace:(SentryId * _Nonnull)traceId;
+    [Static]
+    [Export ("discardProfilerForTrace:")]
+    void DiscardProfilerForTrace (SentryId traceId);
 
     // @property (copy, nonatomic, class) SentryOnAppStartMeasurementAvailable _Nullable onAppStartMeasurementAvailable;
     [Static]
@@ -2403,4 +2474,14 @@ interface PrivateSentrySDKOnly
     [Static]
     [Export ("captureViewHierarchy")]
     NSData CaptureViewHierarchy();
+
+    // +(SentryUser * _Nonnull)userWithDictionary:(NSDictionary * _Nonnull)dictionary;
+    [Static]
+    [Export ("userWithDictionary:")]
+    SentryUser UserWithDictionary (NSDictionary dictionary);
+
+    // +(SentryBreadcrumb * _Nonnull)breadcrumbWithDictionary:(NSDictionary * _Nonnull)dictionary;
+    [Static]
+    [Export ("breadcrumbWithDictionary:")]
+    SentryBreadcrumb BreadcrumbWithDictionary (NSDictionary dictionary);
 }

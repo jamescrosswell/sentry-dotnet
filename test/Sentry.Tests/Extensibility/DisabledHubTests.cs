@@ -28,9 +28,6 @@ public class DisabledHubTests
     public void ConfigureScope_NoOp() => DisabledHub.Instance.ConfigureScope(null!);
 
     [Fact]
-    public void WithScope_NoOp() => DisabledHub.Instance.WithScope(null!);
-
-    [Fact]
     public void BindClient_NoOp() => DisabledHub.Instance.BindClient(null!);
 
     [Fact]

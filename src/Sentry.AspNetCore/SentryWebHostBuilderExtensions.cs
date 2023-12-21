@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Configuration;
@@ -83,8 +84,13 @@ public static class SentryWebHostBuilderExtensions
             logging.AddConfiguration();
 
             var section = context.Configuration.GetSection("Sentry");
+#if NETSTANDARD2_0
             _ = logging.Services.Configure<SentryAspNetCoreOptions>(section);
-
+#else
+            _ = logging.Services.AddSingleton<IConfigureOptions<SentryAspNetCoreOptions>>(_ =>
+                new SentryAspNetCoreOptionsSetup(section)
+            );
+#endif
             _ = logging.Services
                 .AddSingleton<IConfigureOptions<SentryAspNetCoreOptions>, SentryAspNetCoreOptionsSetup>();
             _ = logging.Services.AddSingleton<ILoggerProvider, SentryAspNetCoreLoggerProvider>();
@@ -95,11 +101,11 @@ public static class SentryWebHostBuilderExtensions
 
             var sentryBuilder = logging.Services.AddSentry();
             configureSentry?.Invoke(context, sentryBuilder);
-
         });
 
         _ = builder.ConfigureServices(c => _ =
             c.AddTransient<IStartupFilter, SentryStartupFilter>()
+             .AddTransient<IStartupFilter, SentryTracingStartupFilter>()
              .AddTransient<SentryMiddleware>()
         );
 

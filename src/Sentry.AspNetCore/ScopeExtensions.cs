@@ -38,8 +38,8 @@ public static class ScopeExtensions
 
         if (options.SendDefaultPii && !scope.HasUser())
         {
-            var userFactory = context.RequestServices.GetService<IUserFactory>();
-            var user = userFactory?.Create(context);
+            var userFactory = context.RequestServices.GetService<ISentryUserFactory>();
+            var user = userFactory?.Create();
 
             if (user != null)
             {
@@ -62,7 +62,7 @@ public static class ScopeExtensions
         }
         catch (Exception e)
         {
-            options.LogError("Failed to extract body.", e);
+            options.LogError(e, "Failed to extract body.");
         }
 
         SetEnv(scope, context, options);
@@ -140,7 +140,12 @@ public static class ScopeExtensions
                 continue;
             }
 
-            scope.Request.Headers[requestHeader.Key] = requestHeader.Value;
+            scope.Request.Headers[requestHeader.Key] = requestHeader.Value!;
+
+            if (requestHeader.Key == HeaderNames.Cookie)
+            {
+                scope.Request.Cookies = requestHeader.Value;
+            }
         }
 
         // TODO: Hide these 'Env' behind some extension method as
@@ -156,13 +161,15 @@ public static class ScopeExtensions
 
         if (context.Response.Headers.TryGetValue("Server", out var server))
         {
-            scope.Request.Env["SERVER_SOFTWARE"] = server;
+            scope.Request.Env["SERVER_SOFTWARE"] = server!;
         }
     }
 
     private static void SetBody(Scope scope, HttpContext context, SentryAspNetCoreOptions options)
     {
-        var extractors = context.RequestServices.GetService<IEnumerable<IRequestPayloadExtractor>>();
+        // Resharper says this can't be null, but actually it can if SetBody is called multiple times in a single request
+        // ReSharper disable once ConditionalAccessQualifierIsNonNullableAccordingToAPIContract
+        var extractors = context.RequestServices?.GetService<IEnumerable<IRequestPayloadExtractor>>();
         if (extractors == null)
         {
             return;

@@ -22,7 +22,7 @@ public interface IHub :
     /// <summary>
     /// Starts a transaction.
     /// </summary>
-    ITransaction StartTransaction(
+    ITransactionTracer StartTransaction(
         ITransactionContext context,
         IReadOnlyDictionary<string, object?> customSamplingContext);
 
@@ -40,9 +40,38 @@ public interface IHub :
     ISpan? GetSpan();
 
     /// <summary>
-    /// Gets the Sentry trace header for the last active span.
+    /// Gets the Sentry trace header that allows tracing across services
     /// </summary>
     SentryTraceHeader? GetTraceHeader();
+
+    /// <summary>
+    /// Gets the Sentry baggage header that allows tracing across services
+    /// </summary>
+    BaggageHeader? GetBaggage();
+
+    /// <summary>
+    /// Continues a trace based on HTTP header values provided as strings.
+    /// </summary>
+    /// <remarks>
+    /// If no "sentry-trace" header is provided a random trace ID and span ID is created.
+    /// </remarks>
+    TransactionContext ContinueTrace(
+        string? traceHeader,
+        string? baggageHeader,
+        string? name = null,
+        string? operation = null);
+
+    /// <summary>
+    /// Continues a trace based on HTTP header values.
+    /// </summary>
+    /// <remarks>
+    /// If no "sentry-trace" header is provided a random trace ID and span ID is created.
+    /// </remarks>
+    TransactionContext ContinueTrace(
+        SentryTraceHeader? traceHeader,
+        BaggageHeader? baggageHeader,
+        string? name = null,
+        string? operation = null);
 
     /// <summary>
     /// Starts a new session.
@@ -77,4 +106,16 @@ public interface IHub :
     /// <param name="configureScope">The callback to configure the scope.</param>
     /// <returns></returns>
     public SentryId CaptureEvent(SentryEvent evt, Action<Scope> configureScope);
+
+    /// <summary>
+    /// Captures an event with a configurable scope.
+    /// </summary>
+    /// <remarks>
+    /// This allows modifying a scope without affecting other events.
+    /// </remarks>
+    /// <param name="evt">The event to be captured.</param>
+    /// <param name="hint">An optional hint to be provided with the event</param>
+    /// <param name="configureScope">The callback to configure the scope.</param>
+    /// <returns></returns>
+    public SentryId CaptureEvent(SentryEvent evt, Hint? hint, Action<Scope> configureScope);
 }

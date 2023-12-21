@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Sentry.AspNetCore.TestUtils;
+using Sentry.Internal.OpenTelemetry;
 
 namespace Sentry.AspNetCore.Tests;
 
@@ -33,7 +34,6 @@ public class SentryTracingMiddlewareTests
             .Configure(app =>
             {
                 app.UseRouting();
-                app.UseSentryTracing();
 
                 app.UseEndpoints(routes =>
                 {
@@ -55,7 +55,10 @@ public class SentryTracingMiddlewareTests
         sentryClient.Received(2).CaptureTransaction(
             Arg.Is<Transaction>(transaction =>
                 transaction.Name == "GET /person/{id}" &&
-                transaction.NameSource == TransactionNameSource.Route));
+                transaction.NameSource == TransactionNameSource.Route),
+            Arg.Any<Scope>(),
+            Arg.Any<Hint>()
+            );
     }
 
     [Fact]
@@ -81,7 +84,6 @@ public class SentryTracingMiddlewareTests
             .Configure(app =>
             {
                 app.UseRouting();
-                app.UseSentryTracing();
 
                 app.UseEndpoints(routes =>
                 {
@@ -101,7 +103,7 @@ public class SentryTracingMiddlewareTests
         // Assert
         transaction.Should().NotBeNull();
         transaction.Name.Should().Be("GET /person/{id}");
-        ((IHasTransactionNameSource)transaction).NameSource.Should().Be(TransactionNameSource.Route);
+        transaction.NameSource.Should().Be(TransactionNameSource.Route);
     }
 
     [Fact]
@@ -125,7 +127,6 @@ public class SentryTracingMiddlewareTests
             .Configure(app =>
             {
                 app.UseRouting();
-                app.UseSentryTracing();
 
                 app.UseEndpoints(routes => routes.Map("/person/{id}", _ => Task.CompletedTask));
             }));
@@ -150,7 +151,53 @@ public class SentryTracingMiddlewareTests
             t.TraceId == SentryId.Parse("75302ac48a024bde9a3b3734a82e36c8") &&
             t.ParentSpanId == SpanId.Parse("1000000000000000") &&
             t.IsSampled == false
-        ));
+        ),
+        Arg.Any<Scope>(),
+        Arg.Any<Hint>()
+        );
+    }
+
+    [Fact]
+    public async Task Transaction_name_includes_slash_prefix()
+    {
+        // Arrange
+        var sentryClient = Substitute.For<ISentryClient>();
+
+        var hub = new Hub(new SentryOptions { Dsn = ValidDsn, TracesSampleRate = 1 }, sentryClient);
+
+        var server = new TestServer(new WebHostBuilder()
+            .UseDefaultServiceProvider(di => di.EnableValidation())
+            .UseSentry()
+            .ConfigureServices(services =>
+            {
+                services.AddRouting();
+
+                services.RemoveAll(typeof(Func<IHub>));
+                services.AddSingleton<Func<IHub>>(() => hub);
+            })
+            .Configure(app =>
+            {
+                app.UseRouting();
+
+                app.UseEndpoints(routes => routes.Map("foo", _ => Task.CompletedTask));
+            }));
+
+        var client = server.CreateClient();
+        Transaction transaction = null;
+        sentryClient.CaptureTransaction(
+            Arg.Do<Transaction>(t => transaction = t),
+            Arg.Any<Scope>(),
+            Arg.Any<Hint>()
+            );
+
+        // Act
+        using var request = new HttpRequestMessage(HttpMethod.Get, "foo");
+
+        await client.SendAsync(request);
+
+        // Assert
+        transaction.Should().NotBeNull();
+        transaction.Name.Should().Be("GET /foo");
     }
 
     [Theory]
@@ -189,7 +236,6 @@ public class SentryTracingMiddlewareTests
             .Configure(app =>
             {
                 app.UseRouting();
-                app.UseSentryTracing();
 
                 app.UseEndpoints(routes => routes.Map("/person/{id}", async _ =>
                 {
@@ -295,7 +341,6 @@ public class SentryTracingMiddlewareTests
             .Configure(app =>
             {
                 app.UseRouting();
-                app.UseSentryTracing();
 
                 app.UseEndpoints(routes => routes.Map("/person/{id}", async _ =>
                 {
@@ -359,7 +404,6 @@ public class SentryTracingMiddlewareTests
             .Configure(app =>
             {
                 app.UseRouting();
-                app.UseSentryTracing();
 
                 app.UseEndpoints(routes =>
                 {
@@ -396,9 +440,7 @@ public class SentryTracingMiddlewareTests
         // Arrange
         ITransactionData transaction = null;
 
-        var sentryClient = Substitute.For<ISentryClient>();
-
-        var hub = new Hub(new SentryOptions { Dsn = ValidDsn, TracesSampleRate = 1 }, sentryClient);
+        var hub = new Hub(new SentryOptions { Dsn = ValidDsn, TracesSampleRate = 1 });
 
         var server = new TestServer(new WebHostBuilder()
             .UseDefaultServiceProvider(di => di.EnableValidation())
@@ -413,7 +455,6 @@ public class SentryTracingMiddlewareTests
             .Configure(app =>
             {
                 app.UseRouting();
-                app.UseSentryTracing();
 
                 app.UseEndpoints(routes =>
                 {
@@ -437,6 +478,10 @@ public class SentryTracingMiddlewareTests
         transaction.Request.Method.Should().Be("GET");
         transaction.Request.Url.Should().Be("http://localhost/person/13");
         transaction.Request.Headers.Should().Contain(new KeyValuePair<string, string>("foo", "bar"));
+        transaction.Extra.Should().ContainKey(OtelSemanticConventions.AttributeHttpRequestMethod);
+        transaction.Extra[OtelSemanticConventions.AttributeHttpRequestMethod].Should().Be("GET");
+        transaction.Extra.Should().ContainKey(OtelSemanticConventions.AttributeHttpResponseStatusCode);
+        transaction.Extra[OtelSemanticConventions.AttributeHttpResponseStatusCode].Should().Be(200);
     }
 
     [Fact]
@@ -471,7 +516,6 @@ public class SentryTracingMiddlewareTests
             .Configure(app =>
             {
                 app.UseRouting();
-                app.UseSentryTracing();
 
                 app.UseEndpoints(routes => routes.Map("/person/{id}", context =>
                 {
@@ -518,7 +562,8 @@ public class SentryTracingMiddlewareTests
             })
             .Configure(app =>
             {
-                app.UseRouting();
+                // We have to do this before routing, otherwise it won't wrap our SentryTracingMiddleware, which is what
+                // binds the ExceptionToSpanMap
                 app.Use(async (_, c) =>
                 {
                     try
@@ -530,7 +575,7 @@ public class SentryTracingMiddlewareTests
                         // We just want to know if it got into Sentry's Hub
                     }
                 });
-                app.UseSentryTracing();
+                app.UseRouting();
 
                 app.UseEndpoints(routes => routes.Map("/person/{id}", _ => throw exception));
             }));
@@ -554,7 +599,7 @@ public class SentryTracingMiddlewareTests
         var expectedName = "My custom name";
 
         var sentryClient = Substitute.For<ISentryClient>();
-        sentryClient.When(x => x.CaptureTransaction(Arg.Any<Transaction>()))
+        sentryClient.When(x => x.CaptureTransaction(Arg.Any<Transaction>(), Arg.Any<Scope>(), Arg.Any<Hint>()))
             .Do(callback => transaction = callback.Arg<Transaction>());
         var options = new SentryAspNetCoreOptions
         {
@@ -596,7 +641,7 @@ public class SentryTracingMiddlewareTests
         Transaction transaction = null;
 
         var sentryClient = Substitute.For<ISentryClient>();
-        sentryClient.When(x => x.CaptureTransaction(Arg.Any<Transaction>()))
+        sentryClient.When(x => x.CaptureTransaction(Arg.Any<Transaction>(), Arg.Any<Scope>(), Arg.Any<Hint>()))
             .Do(callback => transaction = callback.Arg<Transaction>());
         var options = new SentryAspNetCoreOptions
         {

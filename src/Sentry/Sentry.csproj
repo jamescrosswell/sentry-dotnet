@@ -3,22 +3,35 @@
   <PropertyGroup>
     <Description>Official SDK for Sentry - Open-source error tracking that helps developers monitor and fix crashes in real time.</Description>
     <NoWarn Condition="'$(TargetFramework)' == 'netstandard2.0'">$(NoWarn);RS0017</NoWarn>
+    <CLSCompliant Condition="'$(TargetPlatformIdentifier)' == ''">true</CLSCompliant>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(SolutionName)' != 'Sentry.Unity'">
-    <TargetFrameworks>net6.0;net5.0;netcoreapp3.0;netstandard2.1;netstandard2.0;net461</TargetFrameworks>
-    <TargetFrameworks Condition="'$(NO_ANDROID)' == ''">$(TargetFrameworks);net6.0-android</TargetFrameworks>
-    <TargetFrameworks Condition="'$(NO_IOS)' == '' And $([MSBuild]::IsOSPlatform('OSX'))">$(TargetFrameworks);net6.0-ios</TargetFrameworks>
-    <TargetFrameworks Condition="'$(NO_MACCATALYST)' == '' And $([MSBuild]::IsOSPlatform('OSX'))">$(TargetFrameworks);net6.0-maccatalyst</TargetFrameworks>
+    <TargetFrameworks>net8.0;net6.0;netstandard2.1;netstandard2.0;net462</TargetFrameworks>
+    <TargetFrameworks Condition="'$(NO_ANDROID)' == ''">$(TargetFrameworks);net7.0-android;net8.0-android</TargetFrameworks>
+    <TargetFrameworks Condition="'$(NO_IOS)' == '' And $([MSBuild]::IsOSPlatform('OSX'))">$(TargetFrameworks);net7.0-ios;net8.0-ios</TargetFrameworks>
+    <TargetFrameworks Condition="'$(NO_MACCATALYST)' == '' And $([MSBuild]::IsOSPlatform('OSX'))">$(TargetFrameworks);net7.0-maccatalyst;net8.0-maccatalyst</TargetFrameworks>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(SolutionName)' == 'Sentry.Unity'">
-    <TargetFramework>netstandard2.0</TargetFramework>
+    <TargetFrameworks>netstandard2.0;netstandard2.1</TargetFrameworks>
   </PropertyGroup>
 
   <!-- Platform-specific props included here -->
   <Import Project="Platforms\Android\Sentry.Android.props" Condition="'$(TargetPlatformIdentifier)' == 'android'" />
-  <Import Project="Platforms\iOS\Sentry.iOS.props" Condition="'$(TargetPlatformIdentifier)' == 'ios' Or '$(TargetPlatformIdentifier)' == 'maccatalyst'" />
+  <Import Project="Platforms\Cocoa\Sentry.Cocoa.props" Condition="'$(TargetPlatformIdentifier)' == 'ios' Or '$(TargetPlatformIdentifier)' == 'maccatalyst'" />
+  <Import Project="Platforms\Native\Sentry.Native.targets"
+        Condition="'$(TargetPlatformIdentifier)' != 'android' and '$(TargetPlatformIdentifier)' != 'ios' and '$(TargetPlatformIdentifier)' != 'maccatalyst'"/>
+
+  <PropertyGroup Condition="'$(FrameworkSupportsAot)' == 'true'">
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+  <!-- Only include Native bindings code on .NET 8 (non-mobile platforms) -->
+  <ItemGroup Condition="'$(TargetFramework)' != 'net8.0'">
+    <Compile Remove="**\Native\**\*" />
+  </ItemGroup>
 
   <!--
     Ben.Demystifier is compiled directly into Sentry.
@@ -28,7 +41,10 @@
     <Compile Include="..\..\modules\Ben.Demystifier\src\**\*.cs">
       <Link>%(RecursiveDir)\%(Filename)%(Extension)</Link>
     </Compile>
+    <Compile Remove="..\..\modules\Ben.Demystifier\**\obj\**" />
   </ItemGroup>
+
+  <!-- Ben.Demystifier also needs System.Reflection.Metadata 5.0.0 or higher on all platforms. -->
   <ItemGroup Condition="$(TargetFramework.StartsWith('netstandard')) or $(TargetFramework.StartsWith('net4'))">
     <PackageReference Include="System.Reflection.Metadata" Version="5.0.0" />
   </ItemGroup>
@@ -48,7 +64,7 @@
     https://github.com/SimonCropp/Polyfill
   -->
   <ItemGroup>
-    <PackageReference Include="Polyfill" Version="1.9.1" PrivateAssets="all" />
+    <PackageReference Include="Polyfill" Version="1.23.0" PrivateAssets="all" />
   </ItemGroup>
 
   <!--
@@ -64,9 +80,9 @@
     <Reference Include="System.Net.Http" />
   </ItemGroup>
 
-  <!-- System.Text.Json is already included with .NET 5 and higher. Add a direct reference for other targets. -->
-  <ItemGroup Condition="!$(TargetFramework.StartsWith('net5')) and !$(TargetFramework.StartsWith('net6'))">
-    <PackageReference Include="System.Text.Json" Version="5.0.2" />
+  <!-- Ensure at least version 6 of System.Text.Json so we have JsonSerializationContext available -->
+  <ItemGroup Condition="!$(TargetFramework.StartsWith('net6')) and !$(TargetFramework.StartsWith('net7')) and !$(TargetFramework.StartsWith('net8'))">
+    <PackageReference Include="System.Text.Json" Version="6.0.8" />
   </ItemGroup>
 
   <!--
@@ -77,6 +93,10 @@
   <ItemGroup>
     <None Include="buildTransitive\Sentry.targets" Pack="true" PackagePath="buildTransitive\Sentry.targets" />
     <None Include="buildTransitive\Sentry.targets" Pack="true" PackagePath="build\Sentry.targets" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Sentry.Protocol.Envelopes.ISerializable" Alias="ISerializable" />
   </ItemGroup>
 
   <!-- Download the Sentry CLI during the restore phase. -->
@@ -90,35 +110,17 @@
       <_OSArchitecture>$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)</_OSArchitecture>
     </PropertyGroup>
     <ItemGroup>
-      <SentryCLIDownload
-        Condition="'$(CI_PUBLISHING_BUILD)' == 'true' Or ($([MSBuild]::IsOSPlatform('OSX')) And $(_OSArchitecture) == 'Arm64')"
-        Include="sentry-cli-Darwin-arm64" FileHash="b45c3d1fdb403fdfdbce0c0a009a529a803290ea058941ae7a09d8856aeffd06" />
-      <SentryCLIDownload
-        Condition="'$(CI_PUBLISHING_BUILD)' == 'true' Or ($([MSBuild]::IsOSPlatform('OSX')) And $(_OSArchitecture) == 'X64')"
-        Include="sentry-cli-Darwin-x86_64" FileHash="40469a50a74cebfd04c449336809e998c4df941d8aa683971ce1d1f581276502" />
-      <SentryCLIDownload
-        Condition="'$(CI_PUBLISHING_BUILD)' == 'true' Or ($([MSBuild]::IsOSPlatform('Linux')) And $(_OSArchitecture) == 'Arm64')"
-        Include="sentry-cli-Linux-aarch64" FileHash="9cc2d84b09b3e0e0d062b8893f1d5dec1eee512f465cc2d0dbcf51ca6620d1a0" />
-      <SentryCLIDownload
-        Condition="'$(CI_PUBLISHING_BUILD)' == 'true' Or ($([MSBuild]::IsOSPlatform('Linux')) And $(_OSArchitecture) == 'X86')"
-        Include="sentry-cli-Linux-i686" FileHash="f9ec33357136423f5aac598c8c42fc0f6795a29a332dfc34099c6ba8b1307a0b" />
-      <SentryCLIDownload
-        Condition="'$(CI_PUBLISHING_BUILD)' == 'true' Or ($([MSBuild]::IsOSPlatform('Linux')) And $(_OSArchitecture) == 'X64')"
-        Include="sentry-cli-Linux-x86_64" FileHash="18bfbae6c184d976d30f54375815fabe6cfb4e6b7786298bc56f4f1c76a96c2c" />
-      <SentryCLIDownload
-        Condition="'$(CI_PUBLISHING_BUILD)' == 'true' Or ($([MSBuild]::IsOSPlatform('Windows')) And $(_OSArchitecture) == 'X86')"
-        Include="sentry-cli-Windows-i686.exe" FileHash="91da10de2fbdde03aae6f11af3544108d946366afbaaebec982d26fa27ae315a" />
-      <SentryCLIDownload
-        Condition="'$(CI_PUBLISHING_BUILD)' == 'true' Or ($([MSBuild]::IsOSPlatform('Windows')) And $(_OSArchitecture) != 'X86')"
-        Include="sentry-cli-Windows-x86_64.exe" FileHash="1042ec8ec50bca8bc68a3b8b6e58cda6cadf63c23f4245af62971a8e3af2eccd" />
+      <SentryCLIDownload Condition="'$(CI_PUBLISHING_BUILD)' == 'true' Or ($([MSBuild]::IsOSPlatform('OSX')) And $(_OSArchitecture) == 'Arm64')" Include="sentry-cli-Darwin-arm64" FileHash="3714a30704eeee21456a60e75e044e4e3aa36bedeb084f8993ea089ff7577e99" />
+      <SentryCLIDownload Condition="'$(CI_PUBLISHING_BUILD)' == 'true' Or ($([MSBuild]::IsOSPlatform('OSX')) And $(_OSArchitecture) == 'X64')" Include="sentry-cli-Darwin-x86_64" FileHash="5c4d0d3e9d5838a587bcca98163f779843c0207483493dda36630e8e03919331" />
+      <SentryCLIDownload Condition="'$(CI_PUBLISHING_BUILD)' == 'true' Or ($([MSBuild]::IsOSPlatform('Linux')) And $(_OSArchitecture) == 'Arm64')" Include="sentry-cli-Linux-aarch64" FileHash="66d0b504d983ff2f7b5f60ebf5b3c933ba8a93c2a608f759863fd2b446b344fd" />
+      <SentryCLIDownload Condition="'$(CI_PUBLISHING_BUILD)' == 'true' Or ($([MSBuild]::IsOSPlatform('Linux')) And $(_OSArchitecture) == 'X86')" Include="sentry-cli-Linux-i686" FileHash="180306e08e5ec10445aa2f0ce1abb07740dceb30685dc53cd8b26a35909db20f" />
+      <SentryCLIDownload Condition="'$(CI_PUBLISHING_BUILD)' == 'true' Or ($([MSBuild]::IsOSPlatform('Linux')) And $(_OSArchitecture) == 'X64')" Include="sentry-cli-Linux-x86_64" FileHash="23d3fdb2e797a1f49917b13cd040874f6189aff3f24d56d3fb81d74c1f368372" />
+      <SentryCLIDownload Condition="'$(CI_PUBLISHING_BUILD)' == 'true' Or ($([MSBuild]::IsOSPlatform('Windows')) And $(_OSArchitecture) == 'X86')" Include="sentry-cli-Windows-i686.exe" FileHash="a6cb2266418f418df0ce88f16086bbb60090805b9a5d38abee8f6ae1f7eba25f" />
+      <SentryCLIDownload Condition="'$(CI_PUBLISHING_BUILD)' == 'true' Or ($([MSBuild]::IsOSPlatform('Windows')) And $(_OSArchitecture) != 'X86')" Include="sentry-cli-Windows-x86_64.exe" FileHash="bc51a87a60fa13a619ecaa93f9d442ae7e638a1718cb4616c6595ce7ab02ab25" />
     </ItemGroup>
 
     <!-- Download the files -->
-    <DownloadFile
-      SourceUrl="https://downloads.sentry-cdn.com/sentry-cli/$(SentryCLIVersion)/%(SentryCLIDownload.Identity)"
-      DestinationFolder="$(SentryCLIDirectory)"
-      Condition="!Exists('$(SentryCLIDirectory)%(Identity)')"
-      Retries="3">
+    <DownloadFile SourceUrl="https://downloads.sentry-cdn.com/sentry-cli/$(SentryCLIVersion)/%(SentryCLIDownload.Identity)" DestinationFolder="$(SentryCLIDirectory)" Condition="!Exists('$(SentryCLIDirectory)%(Identity)')" Retries="3">
       <Output TaskParameter="DownloadedFile" ItemName="SentryCLIDownloadedFile" />
     </DownloadFile>
 
@@ -132,6 +134,46 @@
   <!-- Bundle the Sentry CLI into the Sentry Nuget package. -->
   <ItemGroup Condition="'$(SentryCLIDirectory)' != ''">
     <None Include="$(SentryCLIDirectory)**" Pack="true" PackagePath="tools\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Sentry.Android.AssemblyReader.Tests" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.AspNet" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.AspNet.Tests" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.AspNetCore" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.AspNetCore.Grpc" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.AspNetCore.Grpc.Tests" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.AspNetCore.Tests" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.AspNetCore.TestUtils" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.Azure.Functions.Worker" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.Azure.Functions.Worker.Tests" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.Benchmarks" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.DiagnosticSource" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.DiagnosticSource.IntegrationTests" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.DiagnosticSource.Tests" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.EntityFramework" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.EntityFramework.Tests" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.Extensions.Logging" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.Extensions.Logging.EfCore.Tests" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.Extensions.Logging.Tests" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.GraphQL.Client" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.GraphQL.Client.Tests" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.Google.Cloud.Functions" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.Google.Cloud.Functions.Tests" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.Log4Net" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.Log4Net.Tests" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.Maui" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.Maui.Tests" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.NLog" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.NLog.Tests" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.OpenTelemetry" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.OpenTelemetry.Tests" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.Profiling" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.Profiling.Tests" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.Serilog" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.Serilog.Tests" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.Testing" PublicKey="$(SentryPublicKey)" />
+    <InternalsVisibleTo Include="Sentry.Tests" PublicKey="$(SentryPublicKey)" />
   </ItemGroup>
 
 </Project>

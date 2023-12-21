@@ -4,7 +4,7 @@
 
   <!-- Never use Sentry CLI for benchmark projects. -->
   <PropertyGroup>
-    <UseSentryCLI>false</UseSentryCLI>
+    <IsPackable>false</IsPackable>
   </PropertyGroup>
 
 </Project>

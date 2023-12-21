@@ -1,4 +1,5 @@
 using Sentry.Infrastructure;
+using Sentry.Internal;
 
 namespace Sentry.Extensibility;
 
@@ -61,20 +62,21 @@ public sealed class HubAdapter : IHub
     /// <summary>
     /// Forwards the call to <see cref="SentrySdk"/>.
     /// </summary>
-    [Obsolete("This method is deprecated in favor of overloads of CaptureEvent, CaptureMessage and CaptureException " +
-              "that provide a callback to a configurable scope.")]
     [DebuggerStepThrough]
-    public void WithScope(Action<Scope> scopeCallback)
-        => SentrySdk.WithScope(scopeCallback);
+    public ITransactionTracer StartTransaction(
+        ITransactionContext context,
+        IReadOnlyDictionary<string, object?> customSamplingContext)
+        => SentrySdk.StartTransaction(context, customSamplingContext);
 
     /// <summary>
     /// Forwards the call to <see cref="SentrySdk"/>.
     /// </summary>
     [DebuggerStepThrough]
-    public ITransaction StartTransaction(
+    internal ITransactionTracer StartTransaction(
         ITransactionContext context,
-        IReadOnlyDictionary<string, object?> customSamplingContext)
-        => SentrySdk.StartTransaction(context, customSamplingContext);
+        IReadOnlyDictionary<string, object?> customSamplingContext,
+        DynamicSamplingContext? dynamicSamplingContext)
+        => SentrySdk.StartTransaction(context, customSamplingContext, dynamicSamplingContext);
 
     /// <summary>
     /// Forwards the call to <see cref="SentrySdk"/>.
@@ -96,6 +98,35 @@ public sealed class HubAdapter : IHub
     [DebuggerStepThrough]
     public SentryTraceHeader? GetTraceHeader()
         => SentrySdk.GetTraceHeader();
+
+    /// <summary>
+    /// Forwards the call to <see cref="SentrySdk"/>.
+    /// </summary>
+    [DebuggerStepThrough]
+    public BaggageHeader? GetBaggage()
+        => SentrySdk.GetBaggage();
+
+    /// <summary>
+    /// Forwards the call to <see cref="SentrySdk"/>.
+    /// </summary>
+    [DebuggerStepThrough]
+    public TransactionContext ContinueTrace(
+        string? traceHeader,
+        string? baggageHeader,
+        string? name = null,
+        string? operation = null)
+        => SentrySdk.ContinueTrace(traceHeader, baggageHeader, name, operation);
+
+    /// <summary>
+    /// Forwards the call to <see cref="SentrySdk"/>.
+    /// </summary>
+    [DebuggerStepThrough]
+    public TransactionContext ContinueTrace(
+        SentryTraceHeader? traceHeader,
+        BaggageHeader? baggageHeader,
+        string? name = null,
+        string? operation = null)
+        => SentrySdk.ContinueTrace(traceHeader, baggageHeader, name, operation);
 
     /// <summary>
     /// Forwards the call to <see cref="SentrySdk"/>.
@@ -175,16 +206,17 @@ public sealed class HubAdapter : IHub
     /// Forwards the call to <see cref="SentrySdk"/>.
     /// </summary>
     [DebuggerStepThrough]
-    public SentryId CaptureException(Exception exception)
-        => SentrySdk.CaptureException(exception);
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public SentryId CaptureEvent(SentryEvent evt, Scope? scope)
+        => SentrySdk.CaptureEvent(evt, scope, null);
 
     /// <summary>
     /// Forwards the call to <see cref="SentrySdk"/>.
     /// </summary>
     [DebuggerStepThrough]
     [EditorBrowsable(EditorBrowsableState.Never)]
-    public SentryId CaptureEvent(SentryEvent evt, Scope? scope)
-        => SentrySdk.CaptureEvent(evt, scope);
+    public SentryId CaptureEvent(SentryEvent evt, Scope? scope, Hint? hint = null)
+        => SentrySdk.CaptureEvent(evt, scope, hint);
 
     /// <summary>
     /// Forwards the call to <see cref="SentrySdk"/>.
@@ -197,10 +229,31 @@ public sealed class HubAdapter : IHub
     /// <summary>
     /// Forwards the call to <see cref="SentrySdk"/>.
     /// </summary>
+    public SentryId CaptureEvent(SentryEvent evt, Hint? hint, Action<Scope> configureScope)
+        => SentrySdk.CaptureEvent(evt, hint, configureScope);
+
+    /// <summary>
+    /// Forwards the call to <see cref="SentrySdk"/>.
+    /// </summary>
+    [DebuggerStepThrough]
+    public SentryId CaptureException(Exception exception)
+        => SentrySdk.CaptureException(exception);
+
+    /// <summary>
+    /// Forwards the call to <see cref="SentrySdk"/>.
+    /// </summary>
     [DebuggerStepThrough]
     [EditorBrowsable(EditorBrowsableState.Never)]
     public void CaptureTransaction(Transaction transaction)
         => SentrySdk.CaptureTransaction(transaction);
+
+    /// <summary>
+    /// Forwards the call to <see cref="SentrySdk"/>.
+    /// </summary>
+    [DebuggerStepThrough]
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public void CaptureTransaction(Transaction transaction, Scope? scope, Hint? hint)
+        => SentrySdk.CaptureTransaction(transaction, scope, hint);
 
     /// <summary>
     /// Forwards the call to <see cref="SentrySdk"/>.

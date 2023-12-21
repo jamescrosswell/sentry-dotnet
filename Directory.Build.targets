@@ -9,7 +9,6 @@
     <SupportedOSPlatformVersion Condition="'$(TargetPlatformIdentifier)' == 'ios'">10.0</SupportedOSPlatformVersion>
     <SupportedOSPlatformVersion Condition="'$(TargetPlatformIdentifier)' == 'maccatalyst'">13.1</SupportedOSPlatformVersion>
     <SupportedOSPlatformVersion Condition="'$(TargetPlatformIdentifier)' == 'android'">21.0</SupportedOSPlatformVersion>
-    <SupportedOSPlatformVersion Condition="'$(TargetPlatformIdentifier)' == 'tizen'">6.5</SupportedOSPlatformVersion>
     <SupportedOSPlatformVersion Condition="'$(TargetPlatformIdentifier)' == 'windows'">10.0.17763.0</SupportedOSPlatformVersion>
     <TargetPlatformMinVersion Condition="'$(TargetPlatformIdentifier)' == 'windows'">10.0.17763.0</TargetPlatformMinVersion>
   </PropertyGroup>
@@ -20,6 +19,10 @@
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetPlatformIdentifier)' != 'ios' And '$(TargetPlatformIdentifier)' != 'maccatalyst'">
+    <!-- Exclude our platform-specific code: -->
+    <Compile Remove="**\*.Cocoa.cs" />
+    <Compile Remove="**\Cocoa\**\*.cs" />
+    <!-- Maui device test projects have these too: -->
     <Compile Remove="**\*.iOS.cs" />
     <Compile Remove="**\iOS\**\*.cs" />
   </ItemGroup>
@@ -29,29 +32,52 @@
     <Compile Remove="**\Windows\**\*.cs" />
   </ItemGroup>
 
-  <ItemGroup Condition="'$(TargetPlatformIdentifier)' != 'tizen'">
-    <Compile Remove="**\*.Tizen.cs" />
-    <Compile Remove="**\Tizen\**\*.cs" />
+  <!-- Allow setting CLSCompliant via property in any csproj -->
+  <ItemGroup>
+    <AssemblyAttribute Include="CLSCompliantAttribute" Condition="'$(CLSCompliant)' == 'true'">
+      <_Parameter1>true</_Parameter1>
+    </AssemblyAttribute>
   </ItemGroup>
+
+  <Target Name="OnlyTargetInstalledWorkloads" BeforeTargets="BeforeBuild" Condition="'$(WorkloadList)' == ''">
+
+    <Exec Command="dotnet workload list" ConsoleToMSBuild="true" StandardOutputImportance="Low" EchoOff="true">
+      <Output TaskParameter="ConsoleOutput" PropertyName="WorkloadList"/>
+    </Exec>
+
+    <PropertyGroup>
+      <AndroidWorkloadVersion>$([System.Text.RegularExpressions.Regex]::Match($(WorkloadList), "\s*(android)\s+(\S+)\s+SDK\s+([0-9\.]+).+").Groups[3].Value)</AndroidWorkloadVersion>
+      <IosWorkloadVersion>$([System.Text.RegularExpressions.Regex]::Match($(WorkloadList), "\s*(ios)\s+(\S+)\s+SDK\s+([0-9\.]+).+").Groups[3].Value)</IosWorkloadVersion>
+      <MacCatalystWorkloadVersion>$([System.Text.RegularExpressions.Regex]::Match($(WorkloadList), "\s*(maccatalyst)\s+(\S+)\s+SDK\s+([0-9\.]+).+").Groups[3].Value)</MacCatalystWorkloadVersion>
+      <MauiWorkloadVersion>$([System.Text.RegularExpressions.Regex]::Match($(WorkloadList), "\s*(maui)\s+(\S+)\s+SDK\s+([0-9\.]+).+").Groups[3].Value)</MauiWorkloadVersion>
+    </PropertyGroup>
+
+    <!-- Disable mobile targets if workloads aren't installed. -->
+    <PropertyGroup Condition="'$(AndroidWorkloadVersion)' == ''">
+      <NO_ANDROID>true</NO_ANDROID>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(IosWorkloadVersion)' == ''">
+      <NO_IOS>true</NO_IOS>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(MacCatalystWorkloadVersion)' == ''">
+      <NO_MACCATALYST>true</NO_MACCATALYST>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(MauiWorkloadVersion)' == ''">
+      <NO_WINDOWS>true</NO_WINDOWS>
+    </PropertyGroup>
+
+  </Target>
 
   <!-- Workaround for https://github.com/xamarin/xamarin-macios/issues/15897 -->
   <Target Name="_SetPublishFolderTypeNoneOnDocFileItems"
     BeforeTargets="_ComputePublishLocation"
     Condition="'$(OutputType)' == 'Exe' And ('$(TargetPlatformIdentifier)' == 'ios' Or '$(TargetPlatformIdentifier)' == 'maccatalyst')">
     <ItemGroup>
-    <ResolvedFileToPublish
-      Update="@(ResolvedFileToPublish)"
-      Condition="'%(ResolvedFileToPublish.Extension)' == '.xml' And '%(ResolvedFileToPublish.PublishFolderType)' == ''"
-      PublishFolderType="None" />
+      <ResolvedFileToPublish
+        Update="@(ResolvedFileToPublish)"
+        Condition="'%(ResolvedFileToPublish.Extension)' == '.xml' And '%(ResolvedFileToPublish.PublishFolderType)' == ''"
+        PublishFolderType="None" />
     </ItemGroup>
   </Target>
-
-  <!--
-  These are needed because we use project references in this solution.
-  In an app that uses our nuget packages, they will come through the nuget packages automatically.
-  -->
-  <Import Project="$(MSBuildThisFileDirectory)src\Sentry\buildTransitive\Sentry.targets" />
-  <Import Project="$(MSBuildThisFileDirectory)src\Sentry.Bindings.Cocoa\buildTransitive\Sentry.Bindings.Cocoa.targets"
-    Condition="'$(OutputType)' == 'Exe' And ('$(TargetPlatformIdentifier)' == 'ios' Or '$(TargetPlatformIdentifier)' == 'maccatalyst')" />
 
 </Project>

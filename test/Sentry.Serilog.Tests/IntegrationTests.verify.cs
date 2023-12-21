@@ -1,4 +1,5 @@
-﻿namespace Sentry.Serilog.Tests;
+﻿#if NET6_0_OR_GREATER
+namespace Sentry.Serilog.Tests;
 
 [UsesVerify]
 [Collection(nameof(SentrySdkCollection))]
@@ -23,6 +24,7 @@ public class IntegrationTests
                 _.SendDefaultPii = true;
                 _.TextFormatter = new MessageTemplateTextFormatter("[{MyTaskId}] {Message}");
                 _.AttachStacktrace = false;
+                _.Release = "test-release";
             });
 
         Log.Logger = configuration.CreateLogger();
@@ -76,6 +78,7 @@ public class IntegrationTests
                 _.Dsn = ValidDsn;
                 _.Debug = true;
                 _.AttachStacktrace = false;
+                _.Release = "test-release";
             });
 
         Log.Logger = configuration.CreateLogger();
@@ -99,3 +102,4 @@ public class IntegrationTests
             .IgnoreStandardSentryMembers();
     }
 }
+#endif

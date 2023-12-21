@@ -16,7 +16,9 @@ namespace Sentry;
 public class SentryClient : ISentryClient, IDisposable
 {
     private readonly SentryOptions _options;
+    private readonly ISessionManager _sessionManager;
     private readonly RandomValuesFactory _randomValuesFactory;
+    private readonly Enricher _enricher;
 
     internal IBackgroundWorker Worker { get; }
     internal SentryOptions Options => _options;
@@ -32,24 +34,31 @@ public class SentryClient : ISentryClient, IDisposable
     /// </summary>
     /// <param name="options">The configuration for this client.</param>
     public SentryClient(SentryOptions options)
-        : this(options, null, null) { }
+        : this(options, null, null, null) { }
 
     internal SentryClient(
         SentryOptions options,
-        RandomValuesFactory? randomValuesFactory)
-        : this(options, null, randomValuesFactory)
-    {
-    }
-
-    internal SentryClient(
-        SentryOptions options,
-        IBackgroundWorker? worker,
-        RandomValuesFactory? randomValuesFactory = null)
+        IBackgroundWorker? worker = null,
+        RandomValuesFactory? randomValuesFactory = null,
+        ISessionManager? sessionManager = null)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _randomValuesFactory = randomValuesFactory ?? new SynchronizedRandomValuesFactory();
+        _sessionManager = sessionManager ?? new GlobalSessionManager(options);
+        _enricher = new Enricher(options);
 
         options.SetupLogging(); // Only relevant if this client wasn't created as a result of calling Init
+
+        if (AotHelper.IsNativeAot)
+#pragma warning disable CS0162 // Unreachable code detected
+        {
+#pragma warning disable 0162 // Unreachable code on old .NET frameworks
+            options.LogDebug("This looks like a NativeAOT application build.");
+#pragma warning restore 0162
+        } else {
+#pragma warning restore CS0162 // Unreachable code detected
+            options.LogDebug("This looks like a standard JIT/AOT application build.");
+        }
 
         if (worker == null)
         {
@@ -64,7 +73,7 @@ public class SentryClient : ISentryClient, IDisposable
     }
 
     /// <inheritdoc />
-    public SentryId CaptureEvent(SentryEvent? @event, Scope? scope = null)
+    public SentryId CaptureEvent(SentryEvent? @event, Scope? scope = null, Hint? hint = null)
     {
         if (@event == null)
         {
@@ -73,11 +82,11 @@ public class SentryClient : ISentryClient, IDisposable
 
         try
         {
-            return DoSendEvent(@event, scope);
+            return DoSendEvent(@event, hint, scope);
         }
         catch (Exception e)
         {
-            _options.LogError("An error occurred when capturing the event {0}.", e, @event.EventId);
+            _options.LogError(e, "An error occurred when capturing the event {0}.", @event.EventId);
             return SentryId.Empty;
         }
     }
@@ -96,7 +105,10 @@ public class SentryClient : ISentryClient, IDisposable
     }
 
     /// <inheritdoc />
-    public void CaptureTransaction(Transaction transaction)
+    public void CaptureTransaction(Transaction transaction) => CaptureTransaction(transaction, null, null);
+
+    /// <inheritdoc />
+    public void CaptureTransaction(Transaction transaction, Scope? scope, Hint? hint)
     {
         if (transaction.SpanId.Equals(SpanId.Empty))
         {
@@ -122,8 +134,7 @@ public class SentryClient : ISentryClient, IDisposable
         }
 
         // Sampling decision MUST have been made at this point
-        Debug.Assert(transaction.IsSampled is not null,
-            "Attempt to capture transaction without sampling decision.");
+        Debug.Assert(transaction.IsSampled is not null, "Attempt to capture transaction without sampling decision.");
 
         if (transaction.IsSampled is false)
         {
@@ -132,7 +143,30 @@ public class SentryClient : ISentryClient, IDisposable
             return;
         }
 
-        var processedTransaction = BeforeSendTransaction(transaction);
+        scope ??= new Scope(_options);
+        hint ??= new Hint();
+        hint.AddAttachmentsFromScope(scope);
+
+        _options.LogInfo("Capturing transaction.");
+
+        scope.Evaluate();
+        scope.Apply(transaction);
+
+        _enricher.Apply(transaction);
+
+        var processedTransaction = transaction;
+        foreach (var processor in scope.GetAllTransactionProcessors())
+        {
+            processedTransaction = processor.DoProcessTransaction(transaction, hint);
+            if (processedTransaction == null) // Rejected transaction
+            {
+                _options.ClientReportRecorder.RecordDiscardedEvent(DiscardReason.EventProcessor, DataCategory.Transaction);
+                _options.LogInfo("Event dropped by processor {0}", processor.GetType().Name);
+                return;
+            }
+        }
+
+        processedTransaction = BeforeSendTransaction(processedTransaction, hint);
         if (processedTransaction is null) // Rejected transaction
         {
             _options.ClientReportRecorder.RecordDiscardedEvent(DiscardReason.BeforeSend, DataCategory.Transaction);
@@ -140,12 +174,17 @@ public class SentryClient : ISentryClient, IDisposable
             return;
         }
 
+        if (!_options.SendDefaultPii)
+        {
+            processedTransaction.Redact();
+        }
+
         CaptureEnvelope(Envelope.FromTransaction(processedTransaction));
     }
 
-    private Transaction? BeforeSendTransaction(Transaction transaction)
+    private Transaction? BeforeSendTransaction(Transaction transaction, Hint hint)
     {
-        if (_options.BeforeSendTransaction is null)
+        if (_options.BeforeSendTransactionInternal is null)
         {
             return transaction;
         }
@@ -154,14 +193,17 @@ public class SentryClient : ISentryClient, IDisposable
 
         try
         {
-            return _options.BeforeSendTransaction?.Invoke(transaction);
+            return _options.BeforeSendTransactionInternal?.Invoke(transaction, hint);
         }
         catch (Exception e)
         {
-            // Attempt to demystify exceptions before adding them as breadcrumbs.
-            e.Demystify();
+            if (!AotHelper.IsNativeAot)
+            {
+                // Attempt to demystify exceptions before adding them as breadcrumbs.
+                e.Demystify();
+            }
 
-            _options.LogError("The BeforeSendTransaction callback threw an exception. It will be added as breadcrumb and continue.", e);
+            _options.LogError(e, "The BeforeSendTransaction callback threw an exception. It will be added as breadcrumb and continue.");
 
             var data = new Dictionary<string, string>
             {
@@ -197,18 +239,8 @@ public class SentryClient : ISentryClient, IDisposable
     public Task FlushAsync(TimeSpan timeout) => Worker.FlushAsync(timeout);
 
     // TODO: this method needs to be refactored, it's really hard to analyze nullability
-    private SentryId DoSendEvent(SentryEvent @event, Scope? scope)
+    private SentryId DoSendEvent(SentryEvent @event, Hint? hint, Scope? scope)
     {
-        if (_options.SampleRate != null)
-        {
-            if (!_randomValuesFactory.NextBool(_options.SampleRate.Value))
-            {
-                _options.ClientReportRecorder.RecordDiscardedEvent(DiscardReason.SampleRate, DataCategory.Error);
-                _options.LogDebug("Event sampled.");
-                return SentryId.Empty;
-            }
-        }
-
         var filteredExceptions = ApplyExceptionFilters(@event.Exception);
         if (filteredExceptions?.Count > 0)
         {
@@ -219,6 +251,8 @@ public class SentryClient : ISentryClient, IDisposable
         }
 
         scope ??= new Scope(_options);
+        hint ??= new Hint();
+        hint.AddAttachmentsFromScope(scope);
 
         _options.LogInfo("Capturing event.");
 
@@ -249,7 +283,8 @@ public class SentryClient : ISentryClient, IDisposable
 
         foreach (var processor in scope.GetAllEventProcessors())
         {
-            processedEvent = processor.Process(processedEvent);
+            processedEvent = processor.DoProcessEvent(processedEvent, hint);
+
             if (processedEvent == null)
             {
                 _options.ClientReportRecorder.RecordDiscardedEvent(DiscardReason.EventProcessor, DataCategory.Error);
@@ -258,7 +293,7 @@ public class SentryClient : ISentryClient, IDisposable
             }
         }
 
-        processedEvent = BeforeSend(processedEvent);
+        processedEvent = BeforeSend(processedEvent, hint);
         if (processedEvent == null) // Rejected event
         {
             _options.ClientReportRecorder.RecordDiscardedEvent(DiscardReason.BeforeSend, DataCategory.Error);
@@ -266,9 +301,42 @@ public class SentryClient : ISentryClient, IDisposable
             return SentryId.Empty;
         }
 
-        return CaptureEnvelope(Envelope.FromEvent(processedEvent, _options.DiagnosticLogger, scope.Attachments, scope.SessionUpdate))
-            ? processedEvent.EventId
-            : SentryId.Empty;
+        var hasTerminalException = processedEvent.HasTerminalException();
+        if (hasTerminalException)
+        {
+            // Event contains a terminal exception -> end session as crashed
+            _options.LogDebug("Ending session as Crashed, due to unhandled exception.");
+            scope.SessionUpdate = _sessionManager.EndSession(SessionEndStatus.Crashed);
+        }
+        else if (processedEvent.HasException())
+        {
+            // Event contains a non-terminal exception -> report error
+            // (this might return null if the session has already reported errors before)
+            scope.SessionUpdate = _sessionManager.ReportError();
+        }
+
+        if (_options.SampleRate != null)
+        {
+            if (!_randomValuesFactory.NextBool(_options.SampleRate.Value))
+            {
+                _options.ClientReportRecorder.RecordDiscardedEvent(DiscardReason.SampleRate, DataCategory.Error);
+                _options.LogDebug("Event sampled.");
+                return SentryId.Empty;
+            }
+        }
+        else
+        {
+            _options.LogDebug("Event not sampled.");
+        }
+
+        if (!_options.SendDefaultPii)
+        {
+            processedEvent.Redact();
+        }
+
+        var attachments = hint.Attachments.ToList();
+        var envelope = Envelope.FromEvent(processedEvent, _options.DiagnosticLogger, attachments, scope.SessionUpdate);
+        return CaptureEnvelope(envelope) ? processedEvent.EventId : SentryId.Empty;
     }
 
     private IReadOnlyCollection<Exception>? ApplyExceptionFilters(Exception? exception)
@@ -286,13 +354,15 @@ public class SentryClient : ISentryClient, IDisposable
             return new[] { exception };
         }
 
-        if (exception is AggregateException aggregate &&
-            aggregate.InnerExceptions.All(e => ApplyExceptionFilters(e) != null))
+        if (exception is AggregateException aggregate)
         {
-            // All inner exceptions of the aggregate matched a filter, so the event should be filtered.
-            // Note that _options.KeepAggregateException is not relevant here.  Even if we want to keep aggregate
-            // exceptions, we would still never send one if all of its children are supposed to be filtered.
-            return aggregate.InnerExceptions;
+            // Flatten the tree of aggregates such that all the inner exceptions are non-aggregates.
+            var innerExceptions = aggregate.Flatten().InnerExceptions;
+            if (innerExceptions.All(e => ApplyExceptionFilters(e) != null))
+            {
+                // All inner exceptions matched a filter, so the event should be filtered.
+                return innerExceptions;
+            }
         }
 
         // The event should not be filtered.
@@ -319,9 +389,9 @@ public class SentryClient : ISentryClient, IDisposable
         return false;
     }
 
-    private SentryEvent? BeforeSend(SentryEvent? @event)
+    private SentryEvent? BeforeSend(SentryEvent? @event, Hint hint)
     {
-        if (_options.BeforeSend == null)
+        if (_options.BeforeSendInternal == null)
         {
             return @event;
         }
@@ -329,14 +399,17 @@ public class SentryClient : ISentryClient, IDisposable
         _options.LogDebug("Calling the BeforeSend callback");
         try
         {
-            @event = _options.BeforeSend?.Invoke(@event!);
+            @event = _options.BeforeSendInternal?.Invoke(@event!, hint);
         }
         catch (Exception e)
         {
-            // Attempt to demystify exceptions before adding them as breadcrumbs.
-            e.Demystify();
+            if (!AotHelper.IsNativeAot)
+            {
+                // Attempt to demystify exceptions before adding them as breadcrumbs.
+                e.Demystify();
+            }
 
-            _options.LogError("The BeforeSend callback threw an exception. It will be added as breadcrumb and continue.", e);
+            _options.LogError(e, "The BeforeSend callback threw an exception. It will be added as breadcrumb and continue.");
             var data = new Dictionary<string, string>
             {
                 {"message", e.Message}
@@ -359,7 +432,6 @@ public class SentryClient : ISentryClient, IDisposable
     /// Disposes this client
     /// </summary>
     /// <inheritdoc />
-    [Obsolete("Sentry client should not be explicitly disposed of. This method will be removed in version 4.")]
     public void Dispose()
     {
         _options.LogDebug("Flushing SentryClient.");

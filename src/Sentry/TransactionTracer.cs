@@ -1,4 +1,6 @@
+using Sentry.Extensibility;
 using Sentry.Internal;
+using Sentry.Internal.ScopeStack;
 using Sentry.Protocol;
 
 namespace Sentry;
@@ -6,10 +8,14 @@ namespace Sentry;
 /// <summary>
 /// Transaction tracer.
 /// </summary>
-public class TransactionTracer : ITransaction, IHasDistribution, IHasTransactionNameSource, IHasMeasurements
+public class TransactionTracer : ITransactionTracer
 {
     private readonly IHub _hub;
+    private readonly SentryOptions? _options;
+    private readonly Timer? _idleTimer;
+    private long _cancelIdleTimeout;
     private readonly SentryStopwatch _stopwatch = SentryStopwatch.StartNew();
+    private readonly Instrumenter _instrumenter = Instrumenter.Sentry;
 
     /// <inheritdoc />
     public SpanId SpanId
@@ -35,13 +41,13 @@ public class TransactionTracer : ITransaction, IHasDistribution, IHasTransaction
         private set => Contexts.Trace.TraceId = value;
     }
 
-    /// <inheritdoc cref="ITransaction.Name" />
+    /// <inheritdoc cref="ITransactionTracer.Name" />
     public string Name { get; set; }
 
-    /// <inheritdoc cref="IHasTransactionNameSource.NameSource" />
+    /// <inheritdoc cref="ITransactionContext.NameSource" />
     public TransactionNameSource NameSource { get; set; }
 
-    /// <inheritdoc cref="ITransaction.IsParentSampled" />
+    /// <inheritdoc cref="ITransactionTracer.IsParentSampled" />
     public bool? IsParentSampled { get; set; }
 
     /// <inheritdoc />
@@ -54,7 +60,7 @@ public class TransactionTracer : ITransaction, IHasDistribution, IHasTransaction
     public string? Distribution { get; set; }
 
     /// <inheritdoc />
-    public DateTimeOffset StartTimestamp => _stopwatch.StartDateTimeOffset;
+    public DateTimeOffset StartTimestamp { get; internal set; }
 
     /// <inheritdoc />
     public DateTimeOffset? EndTimestamp { get; internal set; }
@@ -87,7 +93,9 @@ public class TransactionTracer : ITransaction, IHasDistribution, IHasTransaction
         }
     }
 
-    /// <inheritdoc />
+    /// <summary>
+    /// The sample rate used for this transaction.
+    /// </summary>
     public double? SampleRate { get; internal set; }
 
     /// <inheritdoc />
@@ -157,7 +165,7 @@ public class TransactionTracer : ITransaction, IHasDistribution, IHasTransaction
     /// <inheritdoc />
     public IReadOnlyDictionary<string, string> Tags => _tags;
 
-    private readonly ConcurrentBag<SpanTracer> _spans = new();
+    private readonly ConcurrentBag<ISpan> _spans = new();
 
     /// <inheritdoc />
     public IReadOnlyCollection<ISpan> Spans => _spans;
@@ -175,34 +183,44 @@ public class TransactionTracer : ITransaction, IHasDistribution, IHasTransaction
     internal ITransactionProfiler? TransactionProfiler { get; set; }
 
     /// <summary>
-    /// Initializes an instance of <see cref="Transaction"/>.
+    /// Used by the Sentry.OpenTelemetry.SentrySpanProcessor to mark a transaction as a Sentry request. Ideally we wouldn't
+    /// create this transaction but since we can't avoid doing that, once we detect that it's a Sentry request we mark it
+    /// as such so that we can prevent finishing the transaction tracer when idle timeout elapses and the TransactionTracer gets converted into
+    /// a Transaction.
     /// </summary>
-    public TransactionTracer(IHub hub, string name, string operation)
-        : this(hub, name, operation, TransactionNameSource.Custom)
+    internal bool IsSentryRequest { get; set; }
+
+    /// <summary>
+    /// Initializes an instance of <see cref="TransactionTracer"/>.
+    /// </summary>
+    public TransactionTracer(IHub hub, ITransactionContext context) : this(hub, context, null)
     {
     }
 
     /// <summary>
     /// Initializes an instance of <see cref="Transaction"/>.
     /// </summary>
-    public TransactionTracer(IHub hub, string name, string operation, TransactionNameSource nameSource)
+    internal TransactionTracer(IHub hub, string name, string operation, TransactionNameSource nameSource = TransactionNameSource.Custom)
     {
         _hub = hub;
+        _options = _hub.GetSentryOptions();
         Name = name;
         NameSource = nameSource;
         SpanId = SpanId.Create();
         TraceId = SentryId.Create();
         Operation = operation;
+        StartTimestamp = _stopwatch.StartDateTimeOffset;
     }
 
     /// <summary>
     /// Initializes an instance of <see cref="TransactionTracer"/>.
     /// </summary>
-    public TransactionTracer(IHub hub, ITransactionContext context)
+    internal TransactionTracer(IHub hub, ITransactionContext context, TimeSpan? idleTimeout = null)
     {
         _hub = hub;
+        _options = _hub.GetSentryOptions();
         Name = context.Name;
-        NameSource = context is IHasTransactionNameSource c ? c.NameSource : TransactionNameSource.Custom;
+        NameSource = context.NameSource;
         Operation = context.Operation;
         SpanId = context.SpanId;
         ParentSpanId = context.ParentSpanId;
@@ -210,64 +228,153 @@ public class TransactionTracer : ITransaction, IHasDistribution, IHasTransaction
         Description = context.Description;
         Status = context.Status;
         IsSampled = context.IsSampled;
+        StartTimestamp = _stopwatch.StartDateTimeOffset;
+
+		if (context is TransactionContext transactionContext)
+        {
+            _instrumenter = transactionContext.Instrumenter;
+        }
+
+        // Set idle timer only if an idle timeout has been provided directly
+        if (idleTimeout.HasValue)
+        {
+            _cancelIdleTimeout = 1;  // Timer will be cancelled once, atomically setting this back to 0
+            _idleTimer = new Timer(state =>
+            {
+                if (state is not TransactionTracer transactionTracer)
+                {
+                    _options?.LogDebug(
+                        $"Idle timeout callback received nor non-TransactionTracer state. " +
+                        "Unable to finish transaction automatically."
+                    );
+                    return;
+                }
+
+                transactionTracer.Finish(Status ?? SpanStatus.Ok);
+            }, this, idleTimeout.Value, Timeout.InfiniteTimeSpan);
+        }
     }
 
     /// <inheritdoc />
-    public void AddBreadcrumb(Breadcrumb breadcrumb) =>
-        _breadcrumbs.Add(breadcrumb);
+    public void AddBreadcrumb(Breadcrumb breadcrumb) => _breadcrumbs.Add(breadcrumb);
 
     /// <inheritdoc />
-    public void SetExtra(string key, object? value) =>
-        _extra[key] = value;
+    public void SetExtra(string key, object? value) => _extra[key] = value;
 
     /// <inheritdoc />
-    public void SetTag(string key, string value) =>
-        _tags[key] = value;
+    public void SetTag(string key, string value) => _tags[key] = value;
 
     /// <inheritdoc />
-    public void UnsetTag(string key) =>
-        _tags.TryRemove(key, out _);
+    public void UnsetTag(string key) => _tags.TryRemove(key, out _);
 
     /// <inheritdoc />
-    [EditorBrowsable(EditorBrowsableState.Never)]
-    public void SetMeasurement(string name, Measurement measurement) =>
-        _measurements[name] = measurement;
+    public void SetMeasurement(string name, Measurement measurement) => _measurements[name] = measurement;
 
-    internal ISpan StartChild(SpanId parentSpanId, string operation)
+    /// <inheritdoc />
+    public ISpan StartChild(string operation) => StartChild(spanId: null, parentSpanId: SpanId, operation);
+
+    internal ISpan StartChild(SpanId? spanId, SpanId parentSpanId, string operation,
+        Instrumenter instrumenter = Instrumenter.Sentry)
+    {
+        if (instrumenter != _instrumenter)
+        {
+            _options?.LogWarning(
+                "Attempted to create a span via {0} instrumentation to a span or transaction" +
+                " originating from {1} instrumentation. The span will not be created.", instrumenter, _instrumenter);
+            return NoOpSpan.Instance;
+        }
+
+        var span = new SpanTracer(_hub, this, parentSpanId, TraceId, operation);
+        if (spanId is { } id)
+        {
+            span.SpanId = id;
+        }
+
+        AddChildSpan(span);
+        return span;
+    }
+
+    private void AddChildSpan(SpanTracer span)
     {
         // Limit spans to 1000
         var isOutOfLimit = _spans.Count >= 1000;
-
-        var span = new SpanTracer(_hub, this, parentSpanId, TraceId, operation)
-        {
-            IsSampled = !isOutOfLimit
-                ? IsSampled
-                : false // sample out out-of-limit spans
-        };
+        span.IsSampled = isOutOfLimit ? false : IsSampled;
 
         if (!isOutOfLimit)
         {
             _spans.Add(span);
+            _activeSpanTracker.Push(span);
         }
-
-        return span;
     }
 
+    private class LastActiveSpanTracker
+    {
+        private readonly object _lock = new object();
+
+        private readonly Lazy<Stack<ISpan>> _trackedSpans = new();
+        private Stack<ISpan> TrackedSpans => _trackedSpans.Value;
+
+        public void Push(ISpan span)
+        {
+            lock(_lock)
+            {
+                TrackedSpans.Push(span);
+            }
+        }
+
+        public ISpan? PeekActive()
+        {
+            lock(_lock)
+            {
+                while (TrackedSpans.Count > 0)
+                {
+                    // Stop tracking inactive spans
+                    var span = TrackedSpans.Peek();
+                    if (!span.IsFinished)
+                    {
+                        return span;
+                    }
+                    TrackedSpans.Pop();
+                }
+                return null;
+            }
+        }
+    }
+    private readonly LastActiveSpanTracker _activeSpanTracker = new LastActiveSpanTracker();
+
     /// <inheritdoc />
-    public ISpan StartChild(string operation) =>
-        StartChild(SpanId, operation);
+    public ISpan? GetLastActiveSpan() => _activeSpanTracker.PeekActive();
 
     /// <inheritdoc />
     public void Finish()
     {
+        _options?.LogDebug("Attempting to finish Transaction {0}.", SpanId);
+        if (Interlocked.Exchange(ref _cancelIdleTimeout, 0) == 1)
+        {
+            _options?.LogDebug("Disposing of idle timer for Transaction {0}.", SpanId);
+            _idleTimer?.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+            _idleTimer?.Dispose();
+        }
+
+        if (IsSentryRequest)
+        {
+            // Normally we wouldn't start transactions for Sentry requests but when instrumenting with OpenTelemetry
+            // we are only able to determine whether it's a sentry request or not when closing a span... we leave these
+            // to be garbage collected and we don't want idle timers triggering on them
+            _options?.LogDebug("Transaction {0} is a Sentry Request. Don't complete.", SpanId);
+            return;
+        }
+
         TransactionProfiler?.Finish();
         Status ??= SpanStatus.Ok;
-        EndTimestamp = _stopwatch.CurrentDateTimeOffset;
+        EndTimestamp ??= _stopwatch.CurrentDateTimeOffset;
+        _options?.LogDebug("Finished Transaction {0}.", SpanId);
 
         foreach (var span in _spans)
         {
             if (!span.IsFinished)
             {
+                _options?.LogDebug("Deadline exceeded for Transaction {0} -> Span {1}.", SpanId, span.SpanId);
                 span.Finish(SpanStatus.DeadlineExceeded);
             }
         }
@@ -298,13 +405,5 @@ public class TransactionTracer : ITransaction, IHasDistribution, IHasTransaction
         Finish(exception, SpanStatusConverter.FromException(exception));
 
     /// <inheritdoc />
-    public ISpan? GetLastActiveSpan() =>
-        // We need to sort by timestamp because the order of ConcurrentBag<T> is not deterministic
-        Spans.OrderByDescending(x => x.StartTimestamp).FirstOrDefault(s => !s.IsFinished);
-
-    /// <inheritdoc />
-    public SentryTraceHeader GetTraceHeader() => new(
-        TraceId,
-        SpanId,
-        IsSampled);
+    public SentryTraceHeader GetTraceHeader() => new(TraceId, SpanId, IsSampled);
 }

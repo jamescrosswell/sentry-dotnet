@@ -1,4 +1,5 @@
 name: Setup Environment
+description: Sets env vars and installs dependencies
 runs:
   using: composite
 
@@ -16,49 +17,21 @@ runs:
         distribution: 'temurin'
         java-version: '11'
 
-    # Android 33 is required for .NET Android targets, but is missing on windows-2019 images.
-    - name: Install Android 33
-      if: runner.os == 'Windows'
-      shell: cmd
-      run: '%ANDROID_HOME%\cmdline-tools\latest\bin\sdkmanager "platforms;android-33"'
-
-    # Note, the following is needed on the windows-2019 image only.
-    # All other versions of .NET we need are pre-installed on the GitHub Actions virtual images.
-    - name: Install .NET 6 SDK
-      uses: actions/setup-dotnet@v3
-      if: runner.os == 'Windows'
-      with:
-        dotnet-version: 6.x.x
-
-    - name: Install .NET 7 SDK
+    # .NET 6 and .NET 8 are not built-in with macos-13
+    - name: Install .NET SDK
       uses: actions/setup-dotnet@v3
       with:
-        dotnet-version: 7.x.x
+        dotnet-version: |
+          6.0.x
+          7.0.x
+          8.0.x
 
-    - name: Dependency Caching
-      uses: actions/cache@v3
-      # Cache is too slow on Windows to be useful.  See https://github.com/actions/cache/issues/752
-      if: runner.os != 'Windows'
-      with:
-        path: ~/.nuget/packages
-        # We don't use a lockfile, so hash all files where we might be keeping <PackageReference> tags.
-        key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.*proj', '**/*.props') }}
-        restore-keys: ${{ runner.os }}-nuget
-
-    # TODO: Figure out how to cache workloads, as they're not quite the same as nuget packages.
     - name: Install .NET Workloads
       shell: bash
       run: >
         dotnet workload install \
           maui-android \
-          ${{ runner.os == 'macOS' && 'maui-ios maui-maccatalyst maui-windows maui-tizen' || '' }} \
+          ${{ runner.os == 'macOS' && 'maui-ios maui-maccatalyst maui-windows' || '' }} \
           ${{ runner.os == 'Windows' && 'maui-windows' || '' }} \
-          --temp-dir "${{ runner.temp }}"
-
-    # We build Sentry.Maui for every supported MAUI target so we can access platform-specific features.
-    # That includes Tizen. We don't need the entire Tizen SDK, but we do need the base Tizen workload.
-    # Though we could install it on all runners, we really only need it when building and packing for NuGet, which we do on macOS only.
-    - name: Install Tizen Workload
-      if: runner.os == 'macOS'
-      shell: bash
-      run: "curl -sSL https://raw.githubusercontent.com/Samsung/Tizen.NET/main/workload/scripts/workload-install.sh | sudo bash"
+          --temp-dir "${{ runner.temp }}" \
+          --skip-sign-check

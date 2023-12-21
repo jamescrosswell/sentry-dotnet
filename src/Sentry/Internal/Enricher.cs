@@ -6,6 +6,8 @@ namespace Sentry.Internal;
 
 internal class Enricher
 {
+    internal const string DefaultIpAddress = "{{auto}}";
+
     private readonly SentryOptions _options;
 
     private readonly Lazy<Runtime> _runtimeLazy = new(() =>
@@ -36,7 +38,16 @@ internal class Enricher
             // RuntimeInformation.OSDescription is throwing on Mono 5.12
             if (!PlatformAbstractions.Runtime.Current.IsMono())
             {
+#if NETFRAMEWORK
+                // RuntimeInformation.* throws on .NET Framework on macOS/Linux
+                try {
+                    eventLike.Contexts.OperatingSystem.RawDescription = RuntimeInformation.OSDescription;
+                } catch {
+                    eventLike.Contexts.OperatingSystem.RawDescription = Environment.OSVersion.VersionString;
+                }
+#else
                 eventLike.Contexts.OperatingSystem.RawDescription = RuntimeInformation.OSDescription;
+#endif
             }
         }
 
@@ -54,29 +65,22 @@ internal class Enricher
             eventLike.Sdk.AddPackage("nuget:" + SdkVersion.Instance.Name, SdkVersion.Instance.Version);
         }
 
-        // Platform
-        eventLike.Platform ??= Sentry.Constants.Platform;
-
         // Release
         eventLike.Release ??= _options.SettingLocator.GetRelease();
 
         // Distribution
-        eventLike.WithDistribution(_ => _.Distribution ??= _options.Distribution);
+        eventLike.Distribution ??= _options.Distribution;
 
         // Environment
         eventLike.Environment ??= _options.SettingLocator.GetEnvironment();
 
         // User
         // Report local user if opt-in PII, no user was already set to event and feature not opted-out:
-        if (_options.SendDefaultPii)
+        if (_options is { SendDefaultPii: true, IsEnvironmentUser: true } && !eventLike.HasUser())
         {
-            if (_options.IsEnvironmentUser && !eventLike.HasUser())
-            {
-                eventLike.User.Username = Environment.UserName;
-            }
-
-            eventLike.User.IpAddress ??= "{{auto}}";
+            eventLike.User.Username = Environment.UserName;
         }
+        eventLike.User.IpAddress ??= DefaultIpAddress;
 
         //Apply App startup and Boot time
         eventLike.Contexts.App.StartTime ??= ProcessInfo.Instance?.StartupTime;

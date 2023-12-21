@@ -4,7 +4,6 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.Maui.LifecycleEvents;
 using Sentry.Extensibility;
-using Sentry.Extensions.Logging;
 using Sentry.Extensions.Logging.Extensions.DependencyInjection;
 using Sentry.Maui;
 using Sentry.Maui.Internal;
@@ -45,8 +44,9 @@ public static class SentryMauiAppBuilderExtensions
         Action<SentryMauiOptions>? configureOptions)
     {
         var services = builder.Services;
-        services.Configure<SentryMauiOptions>(options =>
-            builder.Configuration.GetSection("Sentry").Bind(options));
+
+        var section = builder.Configuration.GetSection("Sentry");
+        services.AddSingleton<IConfigureOptions<SentryMauiOptions>>(_ => new SentryMauiOptionsSetup(section));
 
         if (configureOptions != null)
         {
@@ -54,7 +54,7 @@ public static class SentryMauiAppBuilderExtensions
         }
 
         services.AddLogging();
-        services.AddSingleton<ILoggerProvider, SentryLoggerProvider>();
+        services.AddSingleton<ILoggerProvider, SentryMauiLoggerProvider>();
         services.AddSingleton<IMauiInitializeService, SentryMauiInitializer>();
         services.AddSingleton<IConfigureOptions<SentryMauiOptions>, SentryMauiOptionsSetup>();
         services.AddSingleton<Disposer>();
@@ -78,30 +78,46 @@ public static class SentryMauiAppBuilderExtensions
         builder.ConfigureLifecycleEvents(events =>
         {
 #if __IOS__
-            events.AddiOS(lifecycle => lifecycle.WillFinishLaunching((application, launchOptions) =>
+            events.AddiOS(lifecycle =>
             {
-                // A bit of hackery here, because we can't mock UIKit.UIApplication in tests.
-                var platformApplication = application != null!
-                    ? application.Delegate as IPlatformApplication
-                    : launchOptions["application"] as IPlatformApplication;
+                lifecycle.WillFinishLaunching((application, launchOptions) =>
+                {
+                    // A bit of hackery here, because we can't mock UIKit.UIApplication in tests.
+                    var platformApplication = application != null!
+                        ? application.Delegate as IPlatformApplication
+                        : launchOptions["application"] as IPlatformApplication;
 
-                platformApplication?.BindMauiEvents();
-                return true;
-            }));
+                    platformApplication?.HandleMauiEvents();
+                    return true;
+                });
+                lifecycle.WillTerminate(application =>
+                {
+                    if (application == null!)
+                    {
+                        return;
+                    }
+
+                    var platformApplication = application.Delegate as IPlatformApplication;
+                    platformApplication?.HandleMauiEvents(bind: false);
+                });
+            });
 #elif ANDROID
-            events.AddAndroid(lifecycle => lifecycle.OnApplicationCreating(application =>
-                (application as IPlatformApplication)?.BindMauiEvents()));
+            events.AddAndroid(lifecycle =>
+            {
+                lifecycle.OnApplicationCreating(application => (application as IPlatformApplication)?.HandleMauiEvents());
+                lifecycle.OnDestroy(application => (application as IPlatformApplication)?.HandleMauiEvents(bind: false));
+            });
 #elif WINDOWS
-            events.AddWindows(lifecycle => lifecycle.OnLaunching((application, _) =>
-                (application as IPlatformApplication)?.BindMauiEvents()));
-#elif TIZEN
-            events.AddTizen(lifecycle => lifecycle.OnCreate(application =>
-                (application as IPlatformApplication)?.BindMauiEvents()));
+            events.AddWindows(lifecycle =>
+            {
+                lifecycle.OnLaunching((application, _) => (application as IPlatformApplication)?.HandleMauiEvents());
+                lifecycle.OnClosed((application, _) => (application as IPlatformApplication)?.HandleMauiEvents(bind: false));
+            });
 #endif
         });
     }
 
-    private static void BindMauiEvents(this IPlatformApplication platformApplication)
+    private static void HandleMauiEvents(this IPlatformApplication platformApplication, bool bind = true)
     {
         // We need to resolve the application manually, because it's not necessarily
         // set on platformApplication.Application at this point in the lifecycle.
@@ -119,6 +135,6 @@ public static class SentryMauiAppBuilderExtensions
 
         // Bind the events
         var binder = services.GetRequiredService<IMauiEventsBinder>();
-        binder.BindApplicationEvents(application);
+        binder.HandleApplicationEvents(application, bind);
     }
 }
